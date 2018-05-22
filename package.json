@@ -1,0 +1,16 @@
+{
+  "name": "web-switch",
+  "version": "1.0.0",
+  "description": "",
+  "main": "connect_test.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node connect_test.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "lodash": "^4.17.10",
+    "ws": "^5.2.0"
+  }
+}
