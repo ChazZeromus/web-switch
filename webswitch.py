@@ -10,6 +10,7 @@ from threading import Thread
 from collections import AsyncIterable
 import time
 import logging
+import typing
 
 client_count = 0
 
@@ -72,21 +73,24 @@ class Client(object):
 		# asyncio.run_coroutine_threadsafe(func(), self.router.event_loop).result()
 
 
-def _route_thread(router):
+def _route_thread(
+		message_callback: typing.Callable[[Client, str], None],
+		connections: typing.List[Client],
+		receive_queue: Queue) -> None:
 	print('Main thread started')
 
 	while True:
-		client, data = router.receive_queue.get()
+		client, data = receive_queue.get()
 
 		if client is None:
-			if router.connections:
+			if connections:
 				raise Exception('Connections still exist!')
 			break
 
 		assert isinstance(client, Client)
 
 		if data is None:
-			router.connections.remove(client)
+			connections.remove(client)
 			client.close()
 
 			# future = asyncio.run_coroutine_threadsafe(client.ws.close(), router.event_loop)
@@ -95,16 +99,16 @@ def _route_thread(router):
 
 		print('got: {!r}'.format(data))
 
-		router.handle_message(client, data)
+		message_callback(client, data)
 
 
 class Router(object):
-	def __init__(self, host, port, max_queue_size=100):
+	def __init__(self, host: str, port: int, max_queue_size=100):
 		self.host, self.port = host, port
 
 		self.connections = []
 
-		self.receive_queue = Queue(100)
+		self.receive_queue = Queue(max_queue_size)
 
 		self.closed = False
 
@@ -118,7 +122,7 @@ class Router(object):
 		serve_task = websockets.serve(self.on_connect, 'localhost', 8765)
 		server = serve_task.ws_server
 
-		def loop_thread():
+		def loop_thread() -> None:
 			asyncio.set_event_loop(self.event_loop)
 			self.event_loop.run_until_complete(serve_task)
 			self.event_loop.run_forever()
@@ -136,7 +140,10 @@ class Router(object):
 		loop_thread.start()
 
 		# prev = signal.signal(signal.SIGINT, signal.SIG_IGN)
-		main_thread = Thread(target=_route_thread, args=(self,))
+		main_thread = Thread(
+			target=_route_thread,
+			args=(self.handle_message, self.connections, self.receive_queue),
+		)
 		main_thread.start()
 		# signal.signal(signal.SIGINT, prev)
 
@@ -166,17 +173,13 @@ class Router(object):
 		# and thus causing .result() to wait indefinitely.
 		pending = asyncio.Task.all_tasks()
 
-		async def func():
+		async def func() -> None:
 			# Note that we will get a CancelledError upon calling .result() if
 			# returns_exception is not set, this is due to the list of pending
 			# tasks containing the async-for in on_connect being already cancelled
 			# because of the route_thread issuing close() calls, and you can't
-			# await a cancelled Task.
+			# await a cancelled Task or it raises an cancelled exception.
 			ret = await asyncio.gather(*pending, return_exceptions=True)
-
-			# print('Finished results ({})'.format(len(ret)), ret)
-			# ret = [r for r in ret if r]
-			# print('Finished results truthy ({})'.format(len(ret)), ret)
 
 		print('Finishing remaining tasks')
 
@@ -189,7 +192,7 @@ class Router(object):
 
 		print('Socket server shutdown.')
 
-	async def on_connect(self, websocket: [WebSocketServerProtocol, AsyncIterable], path):
+	async def on_connect(self, websocket: [WebSocketServerProtocol, AsyncIterable], path: str) -> None:
 		if self.closed:
 			print('Rejecting connection', websocket)
 			websocket.close()
@@ -206,7 +209,7 @@ class Router(object):
 
 		print('{} closed'.format(client))
 
-	def handle_message(self, client: Client, data: str):
+	def handle_message(self, client: Client, data: str) -> None:
 		try:
 			json_obj = json.loads(data)
 		except Exception as e:
