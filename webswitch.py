@@ -10,7 +10,7 @@ from threading import Thread
 from collections import AsyncIterable
 import time
 import logging
-import typing
+from typing import *
 
 client_count = 0
 
@@ -44,7 +44,7 @@ class Client(object):
 	def __str__(self):
 		return repr(self)
 
-	def send(self, data: [Message, str]):
+	def send(self, data: Union[Message, str]):
 		if isinstance(data, Message):
 			data = data.toJSON()
 
@@ -56,7 +56,6 @@ class Client(object):
 			asyncio.ensure_future(func(), loop=self.router.event_loop)
 
 		self.router.event_loop.call_soon_threadsafe(callback)
-		# asyncio.run_coroutine_threadsafe(func(data), self.router.event_loop).result()
 
 	def close(self):
 
@@ -74,8 +73,10 @@ class Client(object):
 
 
 def _route_thread(
-		message_callback: typing.Callable[[Client, str], None],
-		connections: typing.List[Client],
+		message_callback: Callable[[Client, str], None],
+		remove_callback: Callable[[Client], Any],
+		connections: List[Client],
+		loop: asyncio.AbstractEventLoop,
 		receive_queue: Queue) -> None:
 	print('Main thread started')
 
@@ -90,7 +91,12 @@ def _route_thread(
 		assert isinstance(client, Client)
 
 		if data is None:
-			connections.remove(client)
+			ret = remove_callback(client)
+
+			# If we got something waitable, wait for it then close client.
+			if asyncio.isfuture(ret) or asyncio.iscoroutine(ret):
+				asyncio.run_coroutine_threadsafe(asyncio.ensure_future(ret), loop).result()
+
 			client.close()
 
 			# future = asyncio.run_coroutine_threadsafe(client.ws.close(), router.event_loop)
@@ -103,10 +109,10 @@ def _route_thread(
 
 
 class Router(object):
-	def __init__(self, host: str, port: int, max_queue_size=100):
+	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		self.host, self.port = host, port
 
-		self.connections = []
+		self.connections = []  # type: List[Client]
 
 		self.receive_queue = Queue(max_queue_size)
 
@@ -142,7 +148,7 @@ class Router(object):
 		# prev = signal.signal(signal.SIGINT, signal.SIG_IGN)
 		main_thread = Thread(
 			target=_route_thread,
-			args=(self.handle_message, self.connections, self.receive_queue),
+			args=(self._handle_message, self.handle_remove, self.connections, self.event_loop, self.receive_queue),
 		)
 		main_thread.start()
 		# signal.signal(signal.SIGINT, prev)
@@ -202,6 +208,11 @@ class Router(object):
 
 		print('connected: {!r} {}'.format(path, client))
 
+		if not self.handle_new(client, path):
+			await client.ws.close()
+			print('Rejected', client)
+			return
+
 		self.connections.append(client)
 
 		async for message in websocket:
@@ -209,7 +220,7 @@ class Router(object):
 
 		print('{} closed'.format(client))
 
-	def handle_message(self, client: Client, data: str) -> None:
+	def _handle_message(self, client: Client, data: str) -> None:
 		try:
 			json_obj = json.loads(data)
 		except Exception as e:
@@ -217,8 +228,26 @@ class Router(object):
 			client.send(Message.error('Decode error'))
 			return
 
-		client.send('That a nice message')
+		# client.send('That a nice message')
+		self.handle_message(client, json_obj)
 
+	def handle_new(self, client: Client, path: str) -> bool:
+		return True
+
+	def handle_message(self, client: Client, data: Any):
+		pass
+
+	def handle_remove(self, client: Client) -> Optional[asyncio.Future]:
+		pass
+
+
+class Channel(Router):
+	def __init__(self, host: str, port: int, max_queue_size: int = 100):
+		super(Channel, self).__init__(host, port, max_queue_size)
+		self.channels = {}  # type: Dict[Tuple[str, str], Set[Client]]
+
+	def handle_new(self, client: Client, path: str):
+		pass
 
 if __name__ == '__main__':
 	router = Router('localhost', 8765)
