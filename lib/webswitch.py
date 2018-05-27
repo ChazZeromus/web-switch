@@ -120,12 +120,6 @@ class Client(object):
 		self.router.event_loop.call_soon_threadsafe(callback)
 
 	def close(self, code=1000, reason=''):
-		with threading.Lock():
-			if self.closed:
-				return
-
-			self.closed = True
-
 		def callback():
 			async def func():
 				if self.in_pool:
