@@ -35,7 +35,7 @@ class Client extends EventEmitter {
     }
 
     handleClose(data) {
-        console.info('Client Socket closed');
+        console.info('Client Socket closed', data);
         this.emit('close', data);
     }
 
@@ -139,6 +139,7 @@ class Client extends EventEmitter {
 async function foo() {
     const client = new Client(URL + '/somechannel/someroom/');
     await client.send({message: 'hello!'});
+    await client.waitForReply(true);
     await client.close();
 }
 
