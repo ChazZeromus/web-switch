@@ -23,6 +23,7 @@ class ChannelClient(Client):
 	def __init__(self, router: Router, **kwargs):
 		super(ChannelClient, self).__init__(router=router)
 		self.acl = ClientACL(**kwargs)
+		self.name = None  # type: str
 
 
 class Channel(Router):
@@ -39,12 +40,15 @@ class Channel(Router):
 	def handle_new(self, client: Client, path: str) -> Optional[Client]:
 		try:
 			# TODO: Filter on printable chars only
-			matches = re.match(r"^\\/(?P<channel>[^/])(?P<room>[^/])(?P<other_path>.+)$", path)
+			matches = re.match(r"^/(?P<channel>[^/]+)(/(?P<room>[^/]*)(/(?P<other>.*))?)?$", path)
 
-			if not matches:
+			groups = {'channel': None, 'room': None }
+
+			if matches:
+				groups.update(matches.groupdict())
+
+			if not groups['channel'] or not groups['room']:
 				raise Exception("Path must be /<channel>/<room>/")
-
-			groups = matches.groupdict()
 
 			logger.debug('New client connection {!r} with path {!r}'.format(client, path))
 

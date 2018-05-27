@@ -3,6 +3,7 @@
 import asyncio
 import websockets
 from websockets.server import WebSocketServerProtocol
+from websockets.exceptions import ConnectionClosed
 import json
 from queue import Queue
 from threading import Thread
@@ -21,21 +22,25 @@ class Message(object):
 			self,
 			data: Any = None,
 			sender: 'Client' = None,
-			recipient: 'Client' = None,
 			success: bool = None,
 			error: str = None
 		):
 		self.data = data
 		self.sender = sender
-		self.recipient = recipient
 		self.success = success
 		self.error = error
+
+	def load(self, json_data):
+		self.data = json_data
+
+		self.success = json_data.get('success')
+		self.error = json_data.get('error')
 
 	@classmethod
 	def error(cls, message):
 		return Message(success=False, error=message)
 
-	def json(self):
+	def json(self, **kwargs):
 		payload = {
 			'data': self.data
 		}
@@ -46,7 +51,27 @@ class Message(object):
 		if self.error or (self.success is not None and not self.success):
 			payload['error'] = self.error
 
+		payload.update(kwargs)
+
 		return json.dumps(payload)
+
+	def send(self, recipients: List['Client']):
+		if self.sender is None:
+			raise Exception('Need a sender in order to send')
+
+		return self.sender.router.send_messages(sender=self.sender, recipients=recipients, message=self)
+
+	def __str__(self):
+		return 'Message({}): {!r}'.format(
+			' '.join([
+				'client: {!r}'.format(self.sender.client_id if self.sender else None),
+			]),
+			self.data
+		)
+
+	def __repr__(self):
+		return str(self)
+
 
 class Client(object):
 	def __init__(self, router: 'Router', ws: WebSocketServerProtocol = None, **extra_kwargs):
@@ -61,19 +86,19 @@ class Client(object):
 
 		router.connection_index += 1
 
-		self.id = router.connection_index
+		self.client_id = router.connection_index
 
 	def copy_to_subclass(self, subclassed_object: 'Client'):
 		if self.router is not subclassed_object.router:
 			raise Exception('Cannot copy to sub-class of different router')
 
-		for v in ('extra', 'ws', 'closed', 'in_pool', 'close_reason', 'close_code', 'id'):
+		for v in ('extra', 'ws', 'closed', 'in_pool', 'close_reason', 'close_code', 'client_id'):
 			my_value = getattr(self, v)
 			setattr(subclassed_object, v, my_value)
 
 	def __repr__(self):
 		tags = [
-			'id:{}'.format(self.id),
+			'id:{}'.format(self.client_id),
 			'addr:{!r}'.format(self.ws.remote_address),
 			'port:{!r}'.format(self.ws.port),
 		]
@@ -114,7 +139,6 @@ class Client(object):
 					self.in_pool = False
 
 				await self.ws.close(code=code, reason=reason)
-
 
 				logger.info('Closed {!r}'.format(self))
 
@@ -328,27 +352,52 @@ class Router(object):
 		self.connections.append(client)
 		client.in_pool = True
 
-		async for message in websocket:
-			self.receive_queue.put((client, message))
+		try:
+			async for message in websocket:
+				self.receive_queue.put((client, message))
 
-		logger.debug('{} closed'.format(client))
+		except ConnectionClosed as e:
+			logger.warning('Client {!r} closed unexpectedly (code: {!r}, reason: {!r})'.format(client, e.code, e.reason))
+			client.close()
+
+		logger.debug('Connection coroutine ended for {}'.format(client))
 
 	def _handle_message(self, client: Client, data: str) -> None:
 		try:
-			json_obj = json.loads(data)
+			json_obj = json.loads(data)  # type: object
+
+			if not isinstance(json_obj, dict):
+				raise Exception('Root value of payload must be object')
+
 		except Exception as e:
 			logger.error('Could not decode json {!r} from {!r}: {!r}'.format(data, client, e))
 			client.send(Message.error('Decode error').json())
 			return
 
+		message = Message()
+		message.load(json_obj)
+		message.sender = client
+
+		logger.debug('Received {}'.format(message))
+
 		# client.send('That a nice message')
-		self.handle_message(client, json_obj)
+		self.handle_message(client, message)
 
 	def handle_new(self, client: Client, path: str) -> Optional[Client]:
 		return client
 
-	def handle_message(self, client: Client, data: Any):
+	def handle_message(self, client: Client, message: Message):
 		pass
 
-	def handle_remove(self, client: Client):
+	def handle_remove(self, client: Client) -> None:
 		pass
+
+	def send_messages(self, sender: Client, recipients: List[Client], message: Message) -> asyncio.Future:
+		payload = message.json(sender=sender.client_id)
+
+		futures = [
+			asyncio.ensure_future(recipient.ws.send(payload), loop=self)
+			for recipient in recipients
+		]
+
+		return asyncio.gather(*futures, loop=self.event_loop, return_exceptions=True)
