@@ -66,10 +66,13 @@ class Message(object):
 class Client(object):
 	def __init__(self, router: 'Router', ws: WebSocketServerProtocol = None, **extra_kwargs):
 		self.extra = extra_kwargs
-		self.ws = ws
+		self.ws = ws  # type: WebSocketServerProtocol
 		self.router = router
 
 		self.closed = False
+		self._close_issued = False
+
+		self.close_future = None  # type: asyncio.Future
 		self.close_reason = None  # type: Optional[str]
 		self.close_code = None  # type: Optional[int]
 		self.in_pool = False
@@ -77,6 +80,8 @@ class Client(object):
 		router.connection_index += 1
 
 		self.client_id = router.connection_index
+
+		self._close_lock = threading.Lock()
 
 	def copy_to_subclass(self, subclassed_object: 'Client'):
 		'''
@@ -98,7 +103,7 @@ class Client(object):
 			f'port:{self.ws.port!r}',
 		]
 
-		if self.closed:
+		if self._close_issued:
 			tags.append('closed')
 
 		return 'Client({})'.format(' '.join(tags))
@@ -119,26 +124,49 @@ class Client(object):
 
 		self.router.event_loop.call_soon_threadsafe(callback)
 
-	def close(self, code=1000, reason=''):
+	def close(self, code: int = 1000, reason: str = ''):
+		with self._close_lock:
+			if self.close_future or self._close_issued:
+				return
+
+			self._close_issued = True
+
+		self.close_code = code or 1000
+		self.close_reason = reason or ''
+
+		async def async_callback():
+			with self._close_lock:
+				self._close_issued = True
+
+			if self.closed:
+				return True
+
+			if self.in_pool:
+				self.router.connections.remove(self)
+
+				# Signal main thread that client has been removed
+				self.router.receive_queue.put((self, None))
+				self.in_pool = False
+
+			await self.ws.close(code=self.close_code, reason=self.close_reason)
+
+			logger.info(f'close() completed for {self!r}')
+
+			self.closed = True
+
+			return True
+
 		def callback():
-			async def func():
-				if self.in_pool:
-					self.router.connections.remove(self)
-
-					# Signal main thread that client has been removed
-					self.router.receive_queue.put((self, None))
-					self.in_pool = False
-
-				await self.ws.close(code=code, reason=reason)
-
-				logger.info(f'Closed {self!r}')
-
-			asyncio.ensure_future(func(), loop=self.router.event_loop)
-
-		self.close_code = code
-		self.close_reason = reason
+			with self._close_lock:
+				self.close_future = asyncio.ensure_future(async_callback(), loop=self.router.event_loop)
 
 		self.router.event_loop.call_soon_threadsafe(callback)
+
+	async def wait_closed(self):
+		while not self.close_future:
+			await asyncio.sleep(0.01, loop=self.router.event_loop)
+
+		await self.close_future
 
 
 def _route_thread(
@@ -275,9 +303,9 @@ class Router(object):
 
 		# Instead wait up to 10 seconds for connections pool to empty, if not just continue
 		logger.info('Waiting up to 10 seconds for remaining connections to close')
-		for i in range(10):
+		for i in range(100):
 			if self.connections:
-				time.sleep(1)
+				time.sleep(0.1)
 			else:
 				break
 
@@ -293,6 +321,8 @@ class Router(object):
 		# before calling func() and creating a task as to not wait for itself
 		# and thus causing .result() to wait indefinitely.
 		pending = asyncio.Task.all_tasks()
+
+		logger.debug(f'Remaining tasks: {pending!r}')
 
 		async def func() -> None:
 			# Note that we will get a CancelledError upon calling .result() if
@@ -322,10 +352,10 @@ class Router(object):
 
 		logger.debug(f'connected: {path!r} {client}')
 
-		# See if subclass returns a new client
-		new_result = self.handle_new(client, path)
-
 		try:
+			# See if subclass returns a new client
+			new_result = self.handle_new(client, path)
+
 			# Reject if it was closed or nothing was returned
 			if not new_result or new_result.closed:
 				raise WebswitchResponseError(client.close_reason)
@@ -358,8 +388,8 @@ class Router(object):
 		except WebswitchResponseError as e:
 			logger.warning(f'Rejected {client} for {e!r}')
 
-			if not client.closed:
-				await client.ws.close(reason=e.response_error)
+			client.close(reason=e.response_error)
+			await client.wait_closed()
 
 		# Handle unexpected errors by displaying a close reason if one was set if handler
 		# closed manually, or show generic error to client like a 500 status.
@@ -368,8 +398,8 @@ class Router(object):
 
 			reason = client.close_reason or 'Unexpected server error'
 
-			if not client.closed:
-				await client.ws.close(reason=reason)
+			client.close(reason=reason)
+			await client.wait_closed()
 
 		try:
 			async for message in websocket:
@@ -377,7 +407,8 @@ class Router(object):
 
 		except ConnectionClosed as e:
 			logger.warning(f'Client {client!r} closed unexpectedly (code: {e.code!r}, reason: {e.reason!r})')
-			client.close(reason='Connection closed unexpectedly')
+			client.close()
+			await client.wait_closed()
 
 		logger.debug(f'Connection coroutine ended for {client}')
 

@@ -65,3 +65,4 @@ def add_dispatch(action: str, dispatcher: ResponseDispatcher, params: Dict[str, 
 		return func
 
 	return decorate
+
