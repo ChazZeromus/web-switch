@@ -1,7 +1,8 @@
 import re
 from typing import *
+import traceback
 
-from lib.dispatch import ResponseDispatcher, add_dispatch
+from lib.dispatch import ResponseDispatcher, AwaitResponse
 from lib.webswitch import Client, Router, Message, WebswitchResponseError
 
 import logging
@@ -22,7 +23,7 @@ class ClientACL:
 
 
 class ChannelClient(Client):
-	def __init__(self, router: Router, **kwargs):
+	def __init__(self, router: 'Channel', **kwargs):
 		super(ChannelClient, self).__init__(router=router)
 		self.acl = ClientACL(**kwargs)
 		self.name = None  # type: str
@@ -30,7 +31,7 @@ class ChannelClient(Client):
 
 class Channel(Router):
 	MASTER_AUTH_TOKEN = 'hunter1'
-	dispatch = ResponseDispatcher({'client': Client, 'message': Message})
+	dispatch_info = ResponseDispatcher({'client': ChannelClient})
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		super(Channel, self).__init__(host, port, max_queue_size)
@@ -43,6 +44,14 @@ class Channel(Router):
 		self.action_handlers = {
 			'whoami': (self.action_whoami, {}),
 		}
+
+		self.dispatcher = self.dispatch_info()
+
+	def handle_start(self):
+		self.dispatcher.start()
+
+	def handle_stop(self):
+		self.dispatcher.stop()
 
 	def handle_new(self, client: Client, path: str) -> Optional[Client]:
 		groups = {'channel': None, 'room': None}
@@ -97,25 +106,41 @@ class Channel(Router):
 		if not isinstance(data, dict):
 			raise WebswitchResponseError('Data body must be an object')
 
-		data = {**data, 'client': client, 'message': message}
+		response_id = message.data.get('response_id')
+
+		data = {**data, 'client': client}
 
 		try:
-			self.dispatch.dispatch(instance=self, action=action, args=data)
+			self.dispatcher.dispatch(instance=self, action=action, args=data, response_id=response_id)
 		except Exception as e:
-			raise WebswitchResponseError(f'Error performing action: {e}')
+			logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
+			raise WebswitchResponseError(f'Error performing action: {e!r}')
 
-	@add_dispatch(action='whoami', dispatcher=dispatch, params={})
-	def action_whoami(self, client: Client, message: Message):
+	@dispatch_info.add_dispatch(action='whoami', params={})
+	def action_whoami(self, client: ChannelClient):
 		new_message = Message(
-			sender=client,
 			data={'id': client.client_id},
 		)
 
-		self.send_messages(sender=client, recipients=[client], message=new_message)
+		self.send_messages(recipients=[client], message=new_message)
 
-	@add_dispatch(action='message', dispatcher=dispatch, params={})
-	def action_message(self, client: Client, message: Message):
+	@dispatch_info.add_dispatch(action='message', params={})
+	def action_message(self, client: ChannelClient):
 		pass
+
+	@dispatch_info.add_dispatch(action='foobar', params={'data': str})
+	async def action_foobar(self, client: ChannelClient, await_response: AwaitResponse, data: str):
+		client.send(Message(data={
+			'data': f'hello, you greeted me with {data}',
+			'response_id': str(await_response.guid)},
+		))
+
+		reply = await await_response()
+
+		client.send(Message(data={
+			'data': f"you said {reply['data']}",
+			'response_id': str(await_response.guid)},
+		))
 
 if __name__ == '__main__':
 	logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')

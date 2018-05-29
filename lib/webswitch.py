@@ -4,15 +4,17 @@ import asyncio
 import websockets
 import json
 from queue import Queue
-from threading import Thread
 import time
 import logging
 import threading
 import traceback
+from copy import deepcopy
 from typing import *
 
 from websockets.server import WebSocketServerProtocol
 from websockets.exceptions import ConnectionClosed
+
+from lib.event_loop import EventLoopThread
 
 client_count = 0
 
@@ -33,34 +35,49 @@ class Message(object):
 	def __init__(
 			self,
 			data: dict = None,
-			sender: 'Client' = None,
 			success: bool = None,
-			error: str = None
+			error: str = None,
 		):
-		self.data = data
-		self.sender = sender
+		self.data = data or {}
 		self.success = success
 		self.error = error
 
 	def load(self, json_data):
-		self.data = json_data
+		self.data = json_data.copy()
 
 		self.success = json_data.get('success')
 		self.error = json_data.get('error')
+
+		for key in ('success', 'error'):
+			if key in self.data:
+				del self.data[key]
+
+		return self
 
 	@classmethod
 	def error(cls, message):
 		return Message(success=False, error=message)
 
+	def _render_tags(self):
+		return []
+
 	def __str__(self):
-		client_id = self.sender.client_id if self.sender else None
-
-		tags = ' '.join([f'client: {client_id!r}'])
-
+		tags = ' '.join(self._render_tags())
 		return f'Message({tags}): {self.data!r}'
 
 	def __repr__(self):
 		return str(self)
+
+	def extend(self, **kwargs):
+		self.data.update(**kwargs)
+		return self
+
+	def clone(self):
+		return Message(
+			data=deepcopy(self.data),
+			success=self.success,
+			error=self.error,
+		)
 
 
 class Client(object):
@@ -111,18 +128,8 @@ class Client(object):
 	def __str__(self):
 		return repr(self)
 
-	def send(self, data: Union[str, Message]):
-		if isinstance(data, Message):
-			data = self.router.stringify_message(data)
-
-		def callback():
-			async def func():
-				await self.ws.send(data)
-				logger.debug(f'Sent payload to {self!r}: {data!r}')
-
-			asyncio.ensure_future(func(), loop=self.router.event_loop)
-
-		self.router.event_loop.call_soon_threadsafe(callback)
+	def send(self, message: Message):
+		self.router.send_messages([self], message)
 
 	def close(self, code: int = 1000, reason: str = ''):
 		with self._close_lock:
@@ -219,8 +226,8 @@ class Router(object):
 	@staticmethod
 	def stringify_message(message: Message, **extra):
 		payload = {
+			**message.data,
 			**extra,
-			'data': message.data
 		}
 
 		if message.success is not None:
@@ -231,56 +238,46 @@ class Router(object):
 
 		return json.dumps(payload)
 
-
 	def serve(self):
 		asyncio.set_event_loop(self.event_loop)
 		serve_task = websockets.serve(self.handle_connect, 'localhost', 8765)
 		server = serve_task.ws_server
 
-		successfully_started_server = False
-		server_condition = threading.Condition()
+		async def async_init_callback():
+			await serve_task
+			return True
 
-		def loop_thread() -> None:
-			nonlocal successfully_started_server
+		async def async_shutdown_callback():
+			logger.info('Shutting down socket server')
+			server.close()
+			logger.info('Waiting for websocket server to die')
+			await server.wait_closed()
 
-			asyncio.set_event_loop(self.event_loop)
-
-			try:
-				self.event_loop.run_until_complete(serve_task)
-				successfully_started_server = True
-			except Exception as e:
-				logger.error(f'Could not start server: {e}')
-
-			with server_condition:
-				server_condition.notify()
-
-			self.event_loop.run_forever()
-
-			self.event_loop.run_until_complete(self.event_loop.shutdown_asyncgens())
-
-			if successfully_started_server:
-				logger.info('Shutting down socket server')
-				server.close()
-
-				logger.info('Waiting for websocket server to die')
-				self.event_loop.run_until_complete(server.wait_closed())
-				self.event_loop.close()
-
-		loop_thread = Thread(target=loop_thread)
+		loop_thread = EventLoopThread(
+			loop=self.event_loop,
+			init_async_func=async_init_callback,
+			shutdown_async_func=async_shutdown_callback,
+		)
 		loop_thread.start()
 
-		main_thread = Thread(
+		main_thread = threading.Thread(
 			target=_route_thread,
 			args=(self._handle_message, self.handle_remove, self.connections, self.event_loop, self.receive_queue),
 		)
 		main_thread.start()
 
-		logger.info(f'Serving {self.host}:{self.port}')
+		success = False
 
-		with server_condition:
-			server_condition.wait()
+		try:
+			success = loop_thread.wait_result()
+		except Exception as e:
+			logger.error(f'{loop_thread.exception_traceback}\nCould not start server: {e!r}')
 
-		if successfully_started_server:
+		if success:
+			self.handle_start()
+
+			logger.info(f'Serving {self.host}:{self.port}')
+
 			try:
 				# time.sleep(6)
 				while True:
@@ -288,9 +285,12 @@ class Router(object):
 
 			except KeyboardInterrupt:
 				logger.warning('SIGINT caught, closing server')
-		else:
-			logger.error('Could not start server!')
 
+			self.handle_stop()
+		else:
+			logger.error(f'{loop_thread.exception_traceback} Could not start server!')
+
+		# Mark router as closed so new connections are dropped in the meantime
 		self.closed = True
 
 		logger.info(f'Closing {len(self.connections)} connections')
@@ -317,28 +317,7 @@ class Router(object):
 
 		main_thread.join()
 
-		# Get all uncompleted tasks to wait on, noteworthy that we're calling this
-		# before calling func() and creating a task as to not wait for itself
-		# and thus causing .result() to wait indefinitely.
-		pending = asyncio.Task.all_tasks()
-
-		logger.debug(f'Remaining tasks: {pending!r}')
-
-		async def func() -> None:
-			# Note that we will get a CancelledError upon calling .result() if
-			# returns_exception is not set, this is due to the list of pending
-			# tasks containing the async-for in on_connect being already cancelled
-			# because of the route_thread issuing close() calls, and you can't
-			# await a cancelled Task or it raises an cancelled exception.
-			await asyncio.gather(*pending, return_exceptions=True)
-
-		logger.info('Finishing remaining tasks')
-
-		asyncio.run_coroutine_threadsafe(func(), loop=self.event_loop).result()
-
-		logger.info('Shutting down event loop thread')
-		self.event_loop.call_soon_threadsafe(self.event_loop.stop)
-
+		loop_thread.shutdown_loop()
 		loop_thread.join()
 
 		logger.info('Socket server shutdown.')
@@ -400,6 +379,7 @@ class Router(object):
 
 			client.close(reason=reason)
 			await client.wait_closed()
+			raise
 
 		try:
 			async for message in websocket:
@@ -419,14 +399,12 @@ class Router(object):
 			if not isinstance(json_obj, dict):
 				raise Exception('Root value of payload must be object')
 
-		except Exception as e:
+		except json.JSONDecodeError as e:
 			logger.error(f'Could not decode json {data!r} from {client!r}: {e!r}')
 			client.send(Message.error('Decode error'))
-			return
+			raise
 
-		message = Message()
-		message.load(json_obj)
-		message.sender = client
+		message = Message().load(json_obj)
 
 		try:
 			self.handle_message(client, message)
@@ -436,6 +414,13 @@ class Router(object):
 
 		except Exception as e:
 			logger.error(f'{traceback.format_exc()}\nUnhandled response exception {e}')
+			raise
+
+	def handle_stop(self):
+		pass
+
+	def handle_start(self):
+		pass
 
 	def handle_new(self, client: Client, path: str) -> Optional[Client]:
 		return client
@@ -446,15 +431,14 @@ class Router(object):
 	def handle_remove(self, client: Client) -> None:
 		pass
 
-	def send_messages(self, sender: Client, recipients: List[Client], message: Message) -> asyncio.Future:
-		payload = self.stringify_message(message, sender=sender.client_id)
+	def send_messages(self, recipients: List[Client], message: Message) -> None:
+		def async_callback():
+			payload = self.stringify_message(message)
 
-		futures = [
-			asyncio.ensure_future(recipient.ws.send(payload), loop=self)
-			for recipient in recipients
-		]
+			for recipient in recipients:
+				asyncio.ensure_future(recipient.ws.send(payload), loop=self.event_loop)
 
-		return asyncio.gather(*futures, loop=self.event_loop, return_exceptions=True)
+		self.event_loop.call_soon_threadsafe(async_callback)
 
 
 __all__ = ['WebswitchResponseError', 'Client', 'Message', 'Router']
