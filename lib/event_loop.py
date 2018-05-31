@@ -22,8 +22,8 @@ class EventLoopThread(threading.Thread):
 			name=None, *,
 			daemon=None):
 
-		self.event_loop_thread_latest_id += 1
-		self.id = self.event_loop_thread_latest_id
+		EventLoopThread.event_loop_thread_latest_id += 1
+		self.id = EventLoopThread.event_loop_thread_latest_id
 
 		self.logger = logging.getLogger(f'EventLoopThread(#{self.id})')
 		self.logger.setLevel(logging.DEBUG)

@@ -45,7 +45,10 @@ class Channel(Router):
 			'whoami': (self.action_whoami, {}),
 		}
 
-		self.dispatcher = self.dispatch_info()
+		self.dispatcher = self.dispatch_info(
+			instance=self,
+			exception_handler=self.action_exception_handler
+		)
 
 	def handle_start(self):
 		self.dispatcher.start()
@@ -111,12 +114,15 @@ class Channel(Router):
 		data = {**data, 'client': client}
 
 		try:
-			self.dispatcher.dispatch(instance=self, action=action, args=data, response_id=response_id)
+			self.dispatcher.dispatch(source=client, action_name=action, args=data, response_id=response_id)
 		except Exception as e:
 			logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
 			raise WebswitchResponseError(f'Error performing action: {e!r}')
 
-	@dispatch_info.add_dispatch(action='whoami', params={})
+	def action_exception_handler(self, source: object, action: str, e: Exception):
+		logger.warning(f'Exception while dispatching for action {action} with source {source}: {e!r}')
+
+	@dispatch_info.add_dispatch(action_name='whoami', params={})
 	def action_whoami(self, client: ChannelClient):
 		new_message = Message(
 			data={'id': client.client_id},
@@ -124,18 +130,18 @@ class Channel(Router):
 
 		self.send_messages(recipients=[client], message=new_message)
 
-	@dispatch_info.add_dispatch(action='message', params={})
+	@dispatch_info.add_dispatch(action_name='message', params={})
 	def action_message(self, client: ChannelClient):
 		pass
 
-	@dispatch_info.add_dispatch(action='foobar', params={'data': str})
+	@dispatch_info.add_dispatch(action_name='foobar', params={'data': str})
 	async def action_foobar(self, client: ChannelClient, await_response: AwaitResponse, data: str):
 		client.send(Message(data={
 			'data': f'hello, you greeted me with {data}',
 			'response_id': str(await_response.guid)},
 		))
 
-		reply = await await_response()
+		reply = await await_response(timeout=5)
 
 		client.send(Message(data={
 			'data': f"you said {reply['data']}",

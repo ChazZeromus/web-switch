@@ -1,0 +1,26 @@
+TODO:
+Maybe enforce a nice logging rule for printable objects:
+    __repr__: Full representation, should be printed at most one time as early as possible, preferably when
+              the object is created so all attributes are known.
+    __str__:  Simplified and easy to read, with not too little but enough to quickly identify the source of an
+              event
+
+              class SomeBigClass(object):
+                def __init__(self, name):
+                  self.id = id(self)
+                  self.name = name
+                  self.a = 10
+                  self.b = 20
+
+                  logger.info(f'Created {self!r}')
+
+                def __repr__(self):
+                  return f'SomeBigClass(id={self.id}, name={self.name}, a={self.a}, b={self.b})'
+
+                def __str__(self):
+                  return f'SomeBigClass(id={self.id}, name={self.name})'
+
+Module level logging is bad because they're hard to manage and synchronize, instead keep them in classes or functions
+
+
+Also write tests!
