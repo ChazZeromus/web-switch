@@ -1,14 +1,11 @@
-from typing import Callable, Dict, Type, Tuple, NewType
+from typing import Callable, Dict, Type, Tuple, Optional, Union
 from threading import Lock
 import asyncio
 import uuid
 import inspect
 from lib.event_loop import EventLoopThread
-from enum import Enum
+import re
 import logging
-
-logger = logging.getLogger('dispatch')
-logger.setLevel(logging.DEBUG)
 
 
 # TODO: Add timeout to await_dispatch and 'bounding' parameters to prevent a single
@@ -59,7 +56,12 @@ class ResponseDispatcher(object):
 
 	reserved_params = {'await_response'}
 
+	latest_id = 0
+
 	def __init__(self, common_params: Dict[str, Type]):
+		ResponseDispatcher.latest_id += 1
+		self.id = ResponseDispatcher.latest_id
+
 		self.actions = {}  # type: Dict[str, 'Action']
 
 		self._verify_param_names(common_params)
@@ -74,15 +76,24 @@ class ResponseDispatcher(object):
 
 		self._stopping = False
 
-		self._exc_handler = None  # type: Callable[[object, str, Exception], None]
+		self._exc_handler = None  # type: Callable[[object, str, Exception, Optional[uuid.UUID]], None]
 
-		logger.debug('Creating ResponseDispatcher')
+		self.logger = logging.getLogger(f'ResponseDispatch:{self.id}')
+		self.logger.setLevel(logging.DEBUG)
+		self.logger.debug(f'Creating {self!r}')
+
+	def __repr__(self):
+		params = ','.join(f'{param}:{type_}' for param, type_ in self.common_params.items())
+		return f'ResponseDispatch(id:{self.id}, params:{params})'
+
+	def __str__(self):
+		return repr(self)
 
 	def start(self):
 		if self.loop_thread is None:
 			self.loop_thread = EventLoopThread()
 
-		logger.debug('Spinning up loop thread')
+		self.logger.debug('Spinning up loop thread')
 		self.loop_thread.start()
 		self.loop_thread.wait_result()
 
@@ -92,14 +103,14 @@ class ResponseDispatcher(object):
 		pending = self._await_responses.values()
 
 		if pending:
-			logger.info(f'Cancelling {len(pending)} pending coroutine actions')
+			self.logger.info(f'Cancelling {len(pending)} pending coroutine actions')
 
 			for await_response in pending:
 				future = await_response.get_current_future()
 				if future:
 					future.cancel()
 
-		logger.debug('Shutting down loop thread, and joining thread')
+		self.logger.debug('Shutting down loop thread, and joining thread')
 		self.loop_thread.shutdown_loop()
 		self.loop_thread.join()
 
@@ -107,7 +118,7 @@ class ResponseDispatcher(object):
 		with self._lock:
 			self._await_responses[key] = await_response
 
-			action, uuid = key
+			action, uuid_ = key
 
 			action_key = (action, source)
 
@@ -119,7 +130,7 @@ class ResponseDispatcher(object):
 
 			del self._await_responses[key]
 
-			action, uuid = key
+			action, uuid_ = key
 
 			action_key = (action, await_response.get_source())
 
@@ -160,7 +171,12 @@ class ResponseDispatcher(object):
 
 		self.actions[action_name] = action
 
-	def await_response(self, await_response: 'AwaitResponse', params: Dict[str, Type], timeout: float = None) -> asyncio.Future:
+	def await_response(
+			self,
+			await_response: 'AwaitResponse',
+			params: Dict[str, Type],
+			timeout: float = None,
+	) -> asyncio.Future:
 		"""
 		Prepares AwaitResponse object and create a future to await on
 		"""
@@ -170,7 +186,7 @@ class ResponseDispatcher(object):
 		future = self.loop_thread.event_loop.create_future()  # type: asyncio.Future
 		await_response.set(future, params)
 
-		logger.debug(f'Awaiting {await_response!r}')
+		self.logger.debug(f'Awaiting {await_response!r}')
 
 		if timeout is not None:
 			# Creating the timeout should be relatively safe. The only places where it can be cancelled is next dispatch
@@ -178,14 +194,14 @@ class ResponseDispatcher(object):
 			async def async_timeout():
 				await asyncio.sleep(timeout, loop=self.loop_thread.event_loop)
 				future.set_exception(DispatchAsyncTimeout())
-				logger.warning(f'Awaiting response {await_response} timed out in {timeout}')
+				self.logger.warning(f'Awaiting response {await_response} timed out in {timeout}')
 
 			# TODO: Maybe we can possibly be sure that we can be safe if the dispatch class stops before
 			# TODO: create_timeout_callback() is called by using the result of run_coroutine_threadsafe to cancel
 			# TODO: in stop(). And if no stop is issued, the concurrent future can be swapped with asyncio's. They
 			# TODO: both have .handle() methods, we could type that attribute as a Cancellabled or something.
 			def create_timeout_callback():
-				logger.debug(f'Also awaiting response with timeout of {timeout}')
+				self.logger.debug(f'Also awaiting response with timeout of {timeout}')
 				asyncio.sleep(timeout)
 				timeout_future = asyncio.ensure_future(async_timeout(), loop=self.loop_thread.event_loop)
 				await_response.set_timeout_future(timeout_future)
@@ -194,16 +210,15 @@ class ResponseDispatcher(object):
 
 		return future
 
-	def dispatch(self, source: object, action_name: str, args: Dict, response_id: str = None):
+	def dispatch(self, source: object, action_name: str, args: Dict, response_id: Union[str, uuid.UUID] = None):
 		"""
 		Dispatches an action onto an instance given the name of the action and the arguments
 		associated. And optionally provide a repsonse ID for coroutine awaiting actions.
-		:param target: Instance to call dispatch actions on (instance of method)
 		:param source: An object representing the source of dispatch, can be None for no source. A source is required
 		for await responses cancel existing await responses.
 		:param action_name: Action name
 		:param args: Action arguments
-		:param response_id:
+		:param response_id: Guid of response session to reply to, if any
 		:return:
 		"""
 		action = self.actions.get(action_name)
@@ -211,12 +226,13 @@ class ResponseDispatcher(object):
 		if action is None:
 			raise DispatchNotFound()
 
-		logger.debug(f'Dispatching for {action}')
+		self.logger.debug(f'Dispatching for {action}')
 
 		# If there is no response ID this is a new action
 		if response_id is None:
 			done_callback = None
 			async_dispatch_callback = None
+			response_guid = None
 
 			# Verify parameters are correct
 			self._verify_params(action_name, args, action.params)
@@ -237,7 +253,7 @@ class ResponseDispatcher(object):
 						if pending_await is not None:
 							future = pending_await.get_current_future()
 							if future:
-								logger.info(f'Cancelling pending exclusive {action_name!r} action')
+								self.logger.info(f'Cancelling pending exclusive {action_name!r} action')
 								# Mark as removed so done callback doesn't try to remove it again
 								pending_await.mark_removed()
 								# Immediately remove it now
@@ -257,6 +273,8 @@ class ResponseDispatcher(object):
 						default_params=action.params
 					)
 
+					response_guid = await_response.guid
+
 					args['await_response'] = await_response
 
 					key = (action_name, await_response.guid)
@@ -264,11 +282,11 @@ class ResponseDispatcher(object):
 					# Prepare the AwaitResponse
 					self._set_await_response(source, key, await_response)
 
-					logger.debug(f'Action is coroutine, created AwaitResponse: {await_response}')
+					self.logger.debug(f'Action is coroutine, created AwaitResponse: {await_response}')
 
 					# Callback to destroy AwaitResponse
-					def remove_await_callback(future: asyncio.Future):
-						logger.debug(f'Action coroutine completed, removing {await_response}')
+					def remove_await_callback(_: asyncio.Future):
+						self.logger.debug(f'Action coroutine completed, removing {await_response}')
 						await_response.remove_and_cancel_timeout()
 
 					done_callback = remove_await_callback
@@ -287,7 +305,7 @@ class ResponseDispatcher(object):
 
 				except Exception as e:
 					def exc_callback(exc):
-						self._exc_handler(source, action_name, exc)
+						self._exc_handler(source, action_name, exc, response_guid)
 
 					event_loop.call_soon(exc_callback, e)
 
@@ -301,7 +319,7 @@ class ResponseDispatcher(object):
 
 			# Try to parse given response id
 			try:
-				key = (action_name, uuid.UUID(response_id))
+				key = (action_name, uuid.UUID(str(response_id)))
 			except ValueError:
 				raise DispatchError('Invalid response id')
 
@@ -325,12 +343,12 @@ class ResponseDispatcher(object):
 
 			# Verify parameters and issue callback
 
-			logger.debug(f'Dispatching continuation of {await_response}')
+			self.logger.debug(f'Dispatching continuation of {await_response}')
 
 			self._verify_params(action_name, args, await_response.get_current_params())
 
 			def set_future_result_callback():
-				logger.debug(f'Fulfilled {await_response}')
+				self.logger.debug(f'Fulfilled {await_response}')
 				# Cancel timeout since no exceptions rose
 				await_response.cancel_timeout()
 				future.set_result(args)
@@ -338,16 +356,20 @@ class ResponseDispatcher(object):
 			self.loop_thread.call_soon_threadsafe(set_future_result_callback)
 
 		else:
-			logger.error(f'UUID collision for {action!r}')
+			self.logger.error(f'UUID collision for {action!r}')
 			raise DispatchError(
 				'Somehow we may have UUID collision-ed with another action of same name but of differing'
 				' synchronicity.'
 			)
 
-	def set_exc_handler(self, exc_handler: Callable[[object, str, Exception], None]):
+	def set_exc_handler(self, exc_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], None]):
 		self._exc_handler = exc_handler
 
-	def __call__(self, instance: object, exception_handler: Callable[[object, str, Exception], None]) -> 'ResponseDispatcher':
+	def __call__(
+			self,
+			instance: object,
+			exception_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], None]
+	) -> 'ResponseDispatcher':
 		"""
 		Create a copy of the ResponseDispatch object. Useful since you don't
 		want a single instance handling all instances that use the ResponseDispatch
@@ -364,9 +386,9 @@ class ResponseDispatcher(object):
 
 		return new_dispatcher
 
-	def add_dispatch(
+	def add_action(
 		self,
-		action_name: str,
+		action_name: str = None,
 		exclusive_async: bool = True,
 		params: Dict[str, Type] = None,
 		timeout: float = None,
@@ -382,6 +404,19 @@ class ResponseDispatcher(object):
 		params = params or {}
 
 		def decorate(func: Callable):
+			nonlocal action_name
+
+			if action_name is None:
+				match = re.match('^action_(?P<name>.+)$', func.__name__)
+
+				if not match:
+					raise Exception("Could not automatically discern action name, or at least"
+						"no the form of 'action_XXX'")
+
+				match = match.groupdict()
+
+				action_name = match['name']
+
 			# TODO: Use inspect.signature to auto-parameterize and verify
 			if action_name in self.actions:
 				raise Exception(f'Dispatched function {func!r} already exists')
@@ -458,6 +493,7 @@ class Action(object):
 	def __str__(self):
 		return repr(self)
 
+
 class AwaitResponse(object):
 	"""
 	A callable object that returns a future for awaiting for responses in a single action.
@@ -485,7 +521,7 @@ class AwaitResponse(object):
 
 	def remove_and_cancel_timeout(self):
 		if self.removed:
-			logger.info('AwaitResponse already removed')
+			self._dispatcher.logger.info('AwaitResponse already removed')
 			return
 
 		self._dispatcher.delete_await_response((self._action, self.guid))
@@ -551,5 +587,4 @@ class DispatchArgumentError(DispatchError):
 class DispatchMissingArgumentError(DispatchArgumentError):
 	def __init__(self, argument_name: str, *args, **kwargs):
 		super(DispatchArgumentError, self).__init__(argument_name=argument_name, *args, **kwargs)
-
 

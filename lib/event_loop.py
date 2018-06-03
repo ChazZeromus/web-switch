@@ -25,10 +25,10 @@ class EventLoopThread(threading.Thread):
 		EventLoopThread.event_loop_thread_latest_id += 1
 		self.id = EventLoopThread.event_loop_thread_latest_id
 
-		self.logger = logging.getLogger(f'EventLoopThread(#{self.id})')
+		self.logger = logging.getLogger(f'EventLoopThread:{self.id}')
 		self.logger.setLevel(logging.DEBUG)
-
 		self.logger.debug('Creating EventLoopThread')
+
 		super(EventLoopThread, self).__init__(
 			group=group,
 			target=target,
@@ -48,7 +48,7 @@ class EventLoopThread(threading.Thread):
 		if executor:
 			self.event_loop.set_default_executor(executor)
 
-		self._result_queue = self._queue_factory()
+		self.init_event = threading.Event()
 
 		self.exception_traceback = None
 		self.exception = None
@@ -76,7 +76,7 @@ class EventLoopThread(threading.Thread):
 		self.logger.debug('Thread started')
 		self.exception = None
 		self.result = None
-		self._result_queue.empty()
+		self.init_event.clear()
 
 		try:
 			self.result = self.event_loop.run_until_complete(self.run_init_async())
@@ -86,7 +86,7 @@ class EventLoopThread(threading.Thread):
 			self.exception = e
 
 		self.logger.debug('Notifying of result')
-		self._result_queue.put(self.result)
+		self.init_event.set()
 
 		self.logger.debug('Calling run_forever()')
 		self.event_loop.run_forever()
@@ -107,7 +107,7 @@ class EventLoopThread(threading.Thread):
 	def wait_result(self):
 		self.logger.debug('Waiting on init_async result')
 
-		self._result_queue.get()
+		self.init_event.wait()
 
 		if self.exception:
 			self.logger.debug('Exception caught')

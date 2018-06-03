@@ -18,9 +18,6 @@ from lib.event_loop import EventLoopThread
 
 client_count = 0
 
-logger = logging.getLogger('web-switch')
-logger.setLevel(logging.DEBUG)
-
 
 class WebswitchResponseError(Exception):
 	def __init__(self, response_error, *args, **kwargs):
@@ -88,8 +85,8 @@ class Client(object):
 
 		self.closed = False
 		self._close_issued = False
+		self._close_event = asyncio.Event(loop=self.router.event_loop)
 
-		self.close_future = None  # type: asyncio.Future
 		self.close_reason = None  # type: Optional[str]
 		self.close_code = None  # type: Optional[int]
 		self.in_pool = False
@@ -100,12 +97,16 @@ class Client(object):
 
 		self._close_lock = threading.Lock()
 
+		self.logger = logging.getLogger(f'Client:{self.client_id}')
+		self.logger.setLevel(logging.DEBUG)
+		self.logger.debug(f'Created client {self!r}')
+
 	def copy_to_subclass(self, subclassed_object: 'Client'):
-		'''
+		"""
 		Copy contents of normal Client object to subclass instance of Client.
 		:param subclassed_object:
 		:return:
-		'''
+		"""
 		if self.router is not subclassed_object.router:
 			raise Exception('Cannot copy to sub-class of different router')
 
@@ -114,29 +115,46 @@ class Client(object):
 			setattr(subclassed_object, v, my_value)
 
 	def __repr__(self):
-		tags = [
-			f'id:{self.client_id!r}',
-			f'addr:{self.ws.remote_address!r}',
-			f'port:{self.ws.port!r}',
-		]
+		if self.ws:
+			addr, port, *_ = self.ws.remote_address
+
+			tags = [
+				f'id:{self.client_id}',
+				f'router:{self.router.id}',
+				f'remote:{addr}:{port}',
+			]
+		else:
+			tags = [f'id:{self.client_id}','broadcast']
 
 		if self._close_issued:
 			tags.append('closed')
 
-		return 'Client({})'.format(' '.join(tags))
+		return 'Client({})'.format(','.join(tags))
 
 	def __str__(self):
-		return repr(self)
+		if self.ws:
+			tags = [
+				f'id:{self.client_id}',
+			]
+		else:
+			tags = [f'id:{self.client_id}','broadcast']
+
+		if self._close_issued:
+			tags.append('closed')
+
+		return 'Client({})'.format(','.join(tags))
 
 	def send(self, message: Message):
 		self.router.send_messages([self], message)
 
 	def close(self, code: int = 1000, reason: str = ''):
 		with self._close_lock:
-			if self.close_future or self._close_issued:
+			if self._close_issued:
+				self.logger.warning('Close already issued')
 				return
 
 			self._close_issued = True
+			self.logger.debug('Issuing close')
 
 		self.close_code = code or 1000
 		self.close_reason = reason or ''
@@ -146,6 +164,7 @@ class Client(object):
 				self._close_issued = True
 
 			if self.closed:
+				self.logger.warning('Close callback cancelled since already closed')
 				return True
 
 			if self.in_pool:
@@ -155,33 +174,39 @@ class Client(object):
 				self.router.receive_queue.put((self, None))
 				self.in_pool = False
 
-			await self.ws.close(code=self.close_code, reason=self.close_reason)
+			try:
+				await self.ws.close(code=self.close_code, reason=self.close_reason)
+			except websockets.InvalidState: # Expected if client closed first
+				pass
+			except Exception as e:
+				self.logger.error(f'Exception while attempting to close connection: {e!r}')
 
-			logger.info(f'close() completed for {self!r}')
+			self._close_event.set()
+
+			self.logger.debug(f'Closed with code {self.close_code} and reason {self.close_reason}')
 
 			self.closed = True
 
 			return True
 
 		def callback():
-			with self._close_lock:
-				self.close_future = asyncio.ensure_future(async_callback(), loop=self.router.event_loop)
+			self.logger.debug('Scheduling close callback')
+			self.close_future = asyncio.ensure_future(async_callback(), loop=self.router.event_loop)
 
 		self.router.event_loop.call_soon_threadsafe(callback)
 
 	async def wait_closed(self):
-		while not self.close_future:
-			await asyncio.sleep(0.01, loop=self.router.event_loop)
-
-		await self.close_future
+		self.logger.debug('Waiting closed')
+		await self._close_event.wait()
+		self.logger.debug('Close arrived')
 
 
 def _route_thread(
 		message_callback: Callable[[Client, str], None],
 		remove_callback: Callable[[Client], None],
 		connections: List[Client],
-		loop: asyncio.AbstractEventLoop,
-		receive_queue: Queue) -> None:
+		receive_queue: Queue,
+		logger: logging.Logger) -> None:
 	logger.info('Main thread started')
 
 	while True:
@@ -209,6 +234,8 @@ def _route_thread(
 
 
 class Router(object):
+	router_last_id = 0
+
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		self.host, self.port = host, port
 
@@ -222,6 +249,16 @@ class Router(object):
 		self.event_loop.set_debug(True)
 
 		self.connection_index = 0
+
+		Router.router_last_id += 1
+		self.id = Router.router_last_id
+
+		self.logger = logging.getLogger(f'Router:{self.id}')
+		self.logger.setLevel(logging.DEBUG)
+		self.logger.debug('Creating Router server')
+
+		self.server_thread = threading.Thread(target=self._serve_forever)
+		self._interrupt_event = threading.Event()
 
 	@staticmethod
 	def stringify_message(message: Message, **extra):
@@ -238,9 +275,27 @@ class Router(object):
 
 		return json.dumps(payload)
 
-	def serve(self):
+	def serve(self, daemon=False):
+		self.server_thread.start()
+
+		if not daemon:
+			try:
+				while True:
+					time.sleep(1)
+			except KeyboardInterrupt:
+				self.logger.warning('Caught keyboard interrupt, ending server thread')
+
+			self.stop_serve()
+
+	def stop_serve(self):
+		self._interrupt_event.set()
+		self.server_thread.join()
+
+	def _serve_forever(self):
+		self._interrupt_event.clear()
+
 		asyncio.set_event_loop(self.event_loop)
-		serve_task = websockets.serve(self.handle_connect, 'localhost', 8765)
+		serve_task = websockets.serve(self.handle_connect, self.host, self.port)
 		server = serve_task.ws_server
 
 		async def async_init_callback():
@@ -248,9 +303,9 @@ class Router(object):
 			return True
 
 		async def async_shutdown_callback():
-			logger.info('Shutting down socket server')
+			self.logger.info('Shutting down socket server')
 			server.close()
-			logger.info('Waiting for websocket server to die')
+			self.logger.info('Waiting for websocket server to die')
 			await server.wait_closed()
 
 		loop_thread = EventLoopThread(
@@ -262,7 +317,13 @@ class Router(object):
 
 		main_thread = threading.Thread(
 			target=_route_thread,
-			args=(self._handle_message, self.handle_remove, self.connections, self.event_loop, self.receive_queue),
+			args=(
+				self._handle_message,
+				self.handle_remove,
+				self.connections,
+				self.receive_queue,
+				self.logger,
+			),
 		)
 		main_thread.start()
 
@@ -271,29 +332,23 @@ class Router(object):
 		try:
 			success = loop_thread.wait_result()
 		except Exception as e:
-			logger.error(f'{loop_thread.exception_traceback}\nCould not start server: {e!r}')
+			self.logger.error(f'{loop_thread.exception_traceback}\nCould not start server: {e!r}')
 
 		if success:
 			self.handle_start()
 
-			logger.info(f'Serving {self.host}:{self.port}')
+			self.logger.info(f'Serving {self.host}:{self.port}')
 
-			try:
-				# time.sleep(6)
-				while True:
-					time.sleep(1)
-
-			except KeyboardInterrupt:
-				logger.warning('SIGINT caught, closing server')
+			self._interrupt_event.wait()
 
 			self.handle_stop()
 		else:
-			logger.error(f'{loop_thread.exception_traceback} Could not start server!')
+			self.logger.error(f'{loop_thread.exception_traceback} Could not start server!')
 
 		# Mark router as closed so new connections are dropped in the meantime
 		self.closed = True
 
-		logger.info(f'Closing {len(self.connections)} connections')
+		self.logger.info(f'Closing {len(self.connections)} connections')
 
 		for client in self.connections[:]:
 			client.close(reason='Server shutting down')
@@ -302,7 +357,7 @@ class Router(object):
 		# that haven't been closed and removed from the connections list yet.
 
 		# Instead wait up to 10 seconds for connections pool to empty, if not just continue
-		logger.info('Waiting up to 10 seconds for remaining connections to close')
+		self.logger.info('Waiting up to 10 seconds for remaining connections to close')
 		for i in range(100):
 			if self.connections:
 				time.sleep(0.1)
@@ -310,9 +365,9 @@ class Router(object):
 				break
 
 		if self.connections:
-			logger.warning(f'Timed out and {len(self.connections)} connections still exist')
+			self.logger.warning(f'Timed out and {len(self.connections)} connections still exist')
 
-		logger.info('Waiting for main thread to finish')
+		self.logger.info('Waiting for main thread to finish')
 		self.receive_queue.put((None, None))
 
 		main_thread.join()
@@ -320,16 +375,16 @@ class Router(object):
 		loop_thread.shutdown_loop()
 		loop_thread.join()
 
-		logger.info('Socket server shutdown.')
+		self.logger.info('Socket server shutdown.')
 
 	async def handle_connect(self, websocket: [WebSocketServerProtocol, AsyncIterable], path: str) -> None:
 		if self.closed:
-			logger.warning('Server is closing, rejecting connection', websocket)
+			self.logger.warning('Server is closing, rejecting connection', websocket)
 			return
 
 		client = Client(router=self, ws=websocket, path=path)
 
-		logger.debug(f'connected: {path!r} {client}')
+		self.logger.debug(f'connected: {path!r} {client}')
 
 		try:
 			# See if subclass returns a new client
@@ -365,7 +420,7 @@ class Router(object):
 
 		# Handle controlled errors by displaying response_error
 		except WebswitchResponseError as e:
-			logger.warning(f'Rejected {client} for {e!r}')
+			self.logger.warning(f'Rejected {client} for {e!r}')
 
 			client.close(reason=e.response_error)
 			await client.wait_closed()
@@ -373,7 +428,7 @@ class Router(object):
 		# Handle unexpected errors by displaying a close reason if one was set if handler
 		# closed manually, or show generic error to client like a 500 status.
 		except Exception as e:
-			logger.error(f'{traceback.format_exc()}\nRejected {client} for unexpected error {e!r}')
+			self.logger.error(f'{traceback.format_exc()}\nRejected {client} for unexpected error {e!r}')
 
 			reason = client.close_reason or 'Unexpected server error'
 
@@ -386,11 +441,11 @@ class Router(object):
 				self.receive_queue.put((client, message))
 
 		except ConnectionClosed as e:
-			logger.warning(f'Client {client!r} closed unexpectedly (code: {e.code!r}, reason: {e.reason!r})')
+			self.logger.warning(f'Client {client!r} closed unexpectedly (code: {e.code!r}, reason: {e.reason!r})')
 			client.close()
 			await client.wait_closed()
 
-		logger.debug(f'Connection coroutine ended for {client}')
+		self.logger.debug(f'Connection coroutine ended for {client}')
 
 	def _handle_message(self, client: Client, data: str) -> None:
 		try:
@@ -400,7 +455,7 @@ class Router(object):
 				raise Exception('Root value of payload must be object')
 
 		except json.JSONDecodeError as e:
-			logger.error(f'Could not decode json {data!r} from {client!r}: {e!r}')
+			self.logger.error(f'Could not decode json {data!r} from {client!r}: {e!r}')
 			client.send(Message.error('Decode error'))
 			raise
 
@@ -409,11 +464,11 @@ class Router(object):
 		try:
 			self.handle_message(client, message)
 		except WebswitchResponseError as e:
-			logger.warning(f'Generated response error {e.response_error}')
+			self.logger.warning(f'Generated response error {e.response_error}')
 			client.send(Message.error(e.response_error))
 
 		except Exception as e:
-			logger.error(f'{traceback.format_exc()}\nUnhandled response exception {e}')
+			self.logger.error(f'{traceback.format_exc()}\nUnhandled response exception {e}')
 			raise
 
 	def handle_stop(self):

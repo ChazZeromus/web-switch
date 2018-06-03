@@ -24,3 +24,9 @@ Module level logging is bad because they're hard to manage and synchronize, inst
 
 
 Also write tests!
+
+Make add_dispatch by default parse method name to auto-capture action name
+
+Supply a None to params in add_dispatch to capture all parameters and require a VAR_KEYWORD argument.
+
+Maybe implement a way for clients to cancel ongoing conversations, like a special cancel message or something.

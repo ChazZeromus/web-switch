@@ -1,14 +1,13 @@
 import re
 from typing import *
 import traceback
+import uuid
+import argparse
 
 from lib.dispatch import ResponseDispatcher, AwaitResponse
 from lib.webswitch import Client, Router, Message, WebswitchResponseError
 
 import logging
-
-logger = logging.getLogger('Channel')
-logger.setLevel(logging.DEBUG)
 
 
 class ClientACL:
@@ -30,16 +29,16 @@ class ChannelClient(Client):
 
 
 class Channel(Router):
-	MASTER_AUTH_TOKEN = 'hunter1'
 	dispatch_info = ResponseDispatcher({'client': ChannelClient})
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		super(Channel, self).__init__(host, port, max_queue_size)
 		self.channels = {}  # type: Dict[Tuple[str, str], Set[Client]]
 
+		self.host, self.port = host, port
+
 		self.broadcast_client = ChannelClient(self)
 
-		logger.info('Creating channel server')
 
 		self.action_handlers = {
 			'whoami': (self.action_whoami, {}),
@@ -49,6 +48,10 @@ class Channel(Router):
 			instance=self,
 			exception_handler=self.action_exception_handler
 		)
+
+		self.logger = logging.getLogger(f'ChannelRouter:{self.id}')
+		self.logger.setLevel(logging.DEBUG)
+		self.logger.info('Creating channel server')
 
 	def handle_start(self):
 		self.dispatcher.start()
@@ -70,7 +73,7 @@ class Channel(Router):
 			if not groups['channel'] or not groups['room']:
 				raise Exception("Path must be /<channel>/<room>/")
 
-			logger.debug(f'New client connection {client} with path {path!r}')
+			self.logger.debug(f'New client connection {client} with path {path!r}')
 
 			key = (groups['channel'], groups['room'])
 
@@ -79,7 +82,7 @@ class Channel(Router):
 			# For now if the room doesn't exist, create it.
 			# TODO: Impl auth room master auth of some kind
 			if channel is None:
-				logger.info(f'Channel {key!r} does not exist, creating')
+				self.logger.info(f'Channel {key!r} does not exist, creating')
 
 				self.channels[key] = channel = set()
 
@@ -87,7 +90,7 @@ class Channel(Router):
 			new_client = ChannelClient(self)
 			channel.add(new_client)
 
-			logger.debug(f'Added web-switch client {client!r} as Channel client to {key!r}')
+			self.logger.debug(f'Added web-switch client {client!r} as Channel client to {key!r}')
 
 			return new_client
 
@@ -96,33 +99,49 @@ class Channel(Router):
 			return None
 
 	def handle_message(self, client: Client, message: Message):
-		action = message.data.get('action')
+		action_name = message.data.get('action')
 
-		if action is None:
-			raise WebswitchResponseError('No action provided' if not action else f'Unknown action {action!r}')
+		if action_name is None:
+			raise WebswitchResponseError(
+				'No action provided' if not action_name else f'Unknown action {action_name!r}'
+			)
 
-		data = message.data.get('data')
+		action = self.dispatcher.actions.get(action_name)
+
+		if not action:
+			raise WebswitchResponseError(f'Invalid action {action!r}')
+
+		data = message.data.get('data') or {}
+
+		# Since we already provide a default argument 'client', remove it
+		params = action.params.copy()
+		del params['client']
 
 		if data is None:
-			raise WebswitchResponseError('No data body provided')
+			if params:
+				raise WebswitchResponseError('No data body provided')
 
-		if not isinstance(data, dict):
-			raise WebswitchResponseError('Data body must be an object')
+		elif not isinstance(data, dict):
+				raise WebswitchResponseError('Data body must be an object')
 
 		response_id = message.data.get('response_id')
 
 		data = {**data, 'client': client}
 
 		try:
-			self.dispatcher.dispatch(source=client, action_name=action, args=data, response_id=response_id)
+			self.dispatcher.dispatch(source=client, action_name=action_name, args=data, response_id=response_id)
 		except Exception as e:
-			logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
+			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
 			raise WebswitchResponseError(f'Error performing action: {e!r}')
 
-	def action_exception_handler(self, source: object, action: str, e: Exception):
-		logger.warning(f'Exception while dispatching for action {action} with source {source}: {e!r}')
+	def action_exception_handler(self, source: object, action: str, e: Exception, response_id: uuid.UUID = None):
+		self.logger.warning(f'Exception while dispatching for action {action} with source {source}: {e!r}')
 
-	@dispatch_info.add_dispatch(action_name='whoami', params={})
+		assert isinstance(source, ChannelClient)
+
+		source.send(Message.error(f'Action error: {e!r}').extend(response_id=str(response_id)))
+
+	@dispatch_info.add_action(params={})
 	def action_whoami(self, client: ChannelClient):
 		new_message = Message(
 			data={'id': client.client_id},
@@ -130,11 +149,11 @@ class Channel(Router):
 
 		self.send_messages(recipients=[client], message=new_message)
 
-	@dispatch_info.add_dispatch(action_name='message', params={})
+	@dispatch_info.add_action(params={})
 	def action_message(self, client: ChannelClient):
 		pass
 
-	@dispatch_info.add_dispatch(action_name='foobar', params={'data': str})
+	@dispatch_info.add_action(params={'data': str})
 	async def action_foobar(self, client: ChannelClient, await_response: AwaitResponse, data: str):
 		client.send(Message(data={
 			'data': f'hello, you greeted me with {data}',
@@ -149,7 +168,30 @@ class Channel(Router):
 		))
 
 if __name__ == '__main__':
+	parser = argparse.ArgumentParser(
+		description='Websocket channel-style server',
+		formatter_class=argparse.ArgumentDefaultsHelpFormatter
+	)
+
+	parser.add_argument(
+		'--host',
+		type=str,
+		metavar='hostname',
+		default='127.0.0.1',
+		help='Host to bind on',
+	)
+
+	parser.add_argument(
+		'--port',
+		type=int,
+		metavar='port',
+		default=8765,
+		help='Port to listen on',
+	)
+
+	args = parser.parse_args()
+
 	logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')
 
-	router = Channel('localhost', 8765)
-	router.serve()
+	router = Channel(args.host, args.port)
+	router.serve(daemon=False)
