@@ -19,13 +19,38 @@ from lib.event_loop import EventLoopThread
 client_count = 0
 
 
-class WebswitchResponseError(Exception):
-	def __init__(self, response_error, *args, **kwargs):
-		if not args:
-			args = [response_error]
+class WebswitchError(BaseException):
+	def __init__(self, error_type: str, message: str, **data):
+		super(WebswitchError, self).__init__()
+		self.message = message
+		self.error_type = error_type
+		self.error_data = data
 
-		super(WebswitchResponseError, self).__init__(*args, **kwargs)
-		self.response_error = response_error
+	def __repr__(self):
+		return (
+			f'WebswitchError('
+			'response_error={self.response_error!r},'
+			'error_type={self.error_type!r},'
+			'data={self.error_data!r})'
+		)
+
+	def __str__(self):
+		return f"{self.error_type}: {self.message}"
+
+
+class WebswitchResponseError(WebswitchError):
+	def __init__(self, message: str, **data):
+		super(WebswitchResponseError, self).__init__(error_type='response', message=message, **data)
+
+
+class WebswitchConnectionError(WebswitchError):
+	def __init__(self, message: str, **data):
+		super(WebswitchConnectionError, self).__init__(error_type='connection', message=message, **data)
+
+
+class WebswitchServerError(WebswitchError):
+	def __init__(self, message: str, **data):
+		super(WebswitchServerError, self).__init__(error_type='server', message=message, **data)
 
 
 class Message(object):
@@ -34,26 +59,49 @@ class Message(object):
 			data: dict = None,
 			success: bool = None,
 			error: str = None,
+			error_data: Dict = None
 		):
 		self.data = data or {}
 		self.success = success
 		self.error = error
+		self.error_data = error_data
 
 	def load(self, json_data):
 		self.data = json_data.copy()
 
 		self.success = json_data.get('success')
 		self.error = json_data.get('error')
+		self.error_data = json_data.get('error_data')
 
-		for key in ('success', 'error'):
+		for key in ('success', 'error', 'error_data'):
 			if key in self.data:
 				del self.data[key]
 
 		return self
 
 	@classmethod
-	def error(cls, message):
-		return Message(success=False, error=message)
+	def error(cls, message, **error_data):
+		return Message(success=False, error=message, error_data=error_data)
+
+	@classmethod
+	def error_from_exc(cls, exception: BaseException):
+		if isinstance(exception, WebswitchError):
+			error_data = exception.error_data.copy()
+
+			# Try to decode error data, if successful then we can serialize it
+			# if not then turn it into a repr'd string and send that instead.
+			for key, value in error_data.items():
+				try:
+					json.dumps(value)
+				except json.JSONDecodeError:
+					error_data[key] = repr(value)
+
+			return cls.error(
+				message=exception.message,
+				error_data={**error_data, type: exception.error_type}
+			)
+
+		return cls.error(str(exception), error_data={'data': repr(exception)})
 
 	def _render_tags(self):
 		return []
@@ -124,7 +172,7 @@ class Client(object):
 				f'remote:{addr}:{port}',
 			]
 		else:
-			tags = [f'id:{self.client_id}','broadcast']
+			tags = [f'id:{self.client_id}', 'broadcast']
 
 		if self._close_issued:
 			tags.append('closed')
@@ -137,7 +185,7 @@ class Client(object):
 				f'id:{self.client_id}',
 			]
 		else:
-			tags = [f'id:{self.client_id}','broadcast']
+			tags = [f'id:{self.client_id}', 'broadcast']
 
 		if self._close_issued:
 			tags.append('closed')
@@ -176,7 +224,7 @@ class Client(object):
 
 			try:
 				await self.ws.close(code=self.close_code, reason=self.close_reason)
-			except websockets.InvalidState: # Expected if client closed first
+			except websockets.InvalidState:  # Expected if client closed first
 				pass
 			except Exception as e:
 				self.logger.error(f'Exception while attempting to close connection: {e!r}')
@@ -272,6 +320,9 @@ class Router(object):
 
 		if message.error or (message.success is not None and not message.success):
 			payload['error'] = message.error
+
+		if message.error_data:
+			payload['error_data'] = message.error_data
 
 		return json.dumps(payload)
 
@@ -392,7 +443,7 @@ class Router(object):
 
 			# Reject if it was closed or nothing was returned
 			if not new_result or new_result.closed:
-				raise WebswitchResponseError(client.close_reason)
+				raise WebswitchConnectionError(client.close_reason)
 
 			# If we received a new client, verify it has the same websocket
 			if new_result is not client:
@@ -402,7 +453,7 @@ class Router(object):
 
 				# Only verify if a websocket was set
 				if new_result.ws is not client.ws:
-					raise WebswitchResponseError(
+					raise WebswitchServerError(
 						f'Client returned by {self.__class__.__name__!r} sub-class does'
 						'not contain the same websocket!'
 					)
@@ -419,10 +470,12 @@ class Router(object):
 			client.in_pool = True
 
 		# Handle controlled errors by displaying response_error
-		except WebswitchResponseError as e:
+		except WebswitchError as e:
 			self.logger.warning(f'Rejected {client} for {e!r}')
 
-			client.close(reason=e.response_error)
+			client.send(Message.error_from_exc(e))
+
+			client.close(reason=str(e))
 			await client.wait_closed()
 
 		# Handle unexpected errors by displaying a close reason if one was set if handler
@@ -431,6 +484,8 @@ class Router(object):
 			self.logger.error(f'{traceback.format_exc()}\nRejected {client} for unexpected error {e!r}')
 
 			reason = client.close_reason or 'Unexpected server error'
+
+			client.send(Message.error_from_exc(e))
 
 			client.close(reason=reason)
 			await client.wait_closed()
@@ -456,19 +511,21 @@ class Router(object):
 
 		except json.JSONDecodeError as e:
 			self.logger.error(f'Could not decode json {data!r} from {client!r}: {e!r}')
-			client.send(Message.error('Decode error'))
+			client.send(Message.error_from_exc(WebswitchError('Decode error')))
 			raise
 
 		message = Message().load(json_obj)
 
 		try:
 			self.handle_message(client, message)
-		except WebswitchResponseError as e:
-			self.logger.warning(f'Generated response error {e.response_error}')
-			client.send(Message.error(e.response_error))
+
+		except WebswitchError as e:
+			self.logger.warning(f'Generated response error: {e.response_error}')
+			client.send(Message.error_from_exc(e))
 
 		except Exception as e:
 			self.logger.error(f'{traceback.format_exc()}\nUnhandled response exception {e}')
+			client.send(Message.error_from_exc(e))
 			raise
 
 	def handle_stop(self):
@@ -496,4 +553,4 @@ class Router(object):
 		self.event_loop.call_soon_threadsafe(async_callback)
 
 
-__all__ = ['WebswitchResponseError', 'Client', 'Message', 'Router']
+__all__ = ['WebswitchError', 'Client', 'Message', 'Router']

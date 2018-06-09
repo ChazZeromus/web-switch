@@ -4,10 +4,20 @@ import traceback
 import uuid
 import argparse
 
-from lib.dispatch import ResponseDispatcher, AwaitResponse
-from lib.webswitch import Client, Router, Message, WebswitchResponseError
+from lib.dispatch import ResponseDispatcher, AwaitResponse, add_action, Action
+from lib.webswitch import Client, Router, Message, WebswitchError, WebswitchConnectionError, WebswitchResponseError
 
 import logging
+
+
+class ChannelResponseError(WebswitchResponseError):
+	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitResponse'], **data):
+		super(ChannelResponseError, self).__init__(message=message, **data)
+		self.set_guid(response)
+
+	@staticmethod
+	def set_guid(exception: WebswitchError, response: Union[uuid.UUID, 'AwaitResponse']):
+		exception.error_data['response_id'] = response
 
 
 class ClientACL:
@@ -27,10 +37,26 @@ class ChannelClient(Client):
 		self.acl = ClientACL(**kwargs)
 		self.name = None  # type: str
 
+class ChannelAwait(AwaitResponse):
+	def __init__(self, client: ChannelClient, original: AwaitResponse):
+		super(ChannelAwait, self).__init__(
+			dispatcher=original.dispatcher,
+			source=original.source,
+			action_name=original.action_name,
+			default_params=original.default_params,
+			guid=original.guid
+		)
+
+		self.client = client
+
+	async def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+		data.update(response_id=str(self.guid))
+
+		self.client.send(Message(data=data))
+
+		return await self(params=params, timeout=timeout)
 
 class Channel(Router):
-	dispatch_info = ResponseDispatcher({'client': ChannelClient})
-
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		super(Channel, self).__init__(host, port, max_queue_size)
 		self.channels = {}  # type: Dict[Tuple[str, str], Set[Client]]
@@ -44,9 +70,11 @@ class Channel(Router):
 			'whoami': (self.action_whoami, {}),
 		}
 
-		self.dispatcher = self.dispatch_info(
+		self.dispatcher = ResponseDispatcher(
 			instance=self,
-			exception_handler=self.action_exception_handler
+			exception_handler=self.action_exception_handler,
+			argument_hook=self.argument_hook,
+			common_params={'client': ChannelClient}
 		)
 
 		self.logger = logging.getLogger(f'ChannelRouter:{self.id}')
@@ -58,6 +86,22 @@ class Channel(Router):
 
 	def handle_stop(self):
 		self.dispatcher.stop()
+
+	def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
+		await_response = args.get('await_response')
+
+		if await_response:
+			assert isinstance(source, ChannelClient)
+
+			new_ar = ChannelAwait(client=source, original=await_response)
+
+			new_args = args.copy()
+			new_args.update(await_response=new_ar)
+
+			return new_args
+
+		return args
+
 
 	def handle_new(self, client: Client, path: str) -> Optional[Client]:
 		groups = {'channel': None, 'room': None}
@@ -71,7 +115,7 @@ class Channel(Router):
 
 			# They absolutely must be provided, no excuses!
 			if not groups['channel'] or not groups['room']:
-				raise Exception("Path must be /<channel>/<room>/")
+				raise WebswitchError("Path must be /<channel>/<room>/")
 
 			self.logger.debug(f'New client connection {client} with path {path!r}')
 
@@ -122,26 +166,42 @@ class Channel(Router):
 				raise WebswitchResponseError('No data body provided')
 
 		elif not isinstance(data, dict):
-				raise WebswitchResponseError('Data body must be an object')
+			raise WebswitchResponseError('Data body must be an object')
 
 		response_id = message.data.get('response_id')
 
 		data = {**data, 'client': client}
 
+		# Dispatch our action
+
 		try:
 			self.dispatcher.dispatch(source=client, action_name=action_name, args=data, response_id=response_id)
+
+		except WebswitchError as e:
+			self.logger.warning(f'Caught error while performing action: {e!r}')
+			ChannelResponseError.set_guid(e, response_id)
+			client.send(Message.error_from_exc(e))
+
 		except Exception as e:
 			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
-			raise WebswitchResponseError(f'Error performing action: {e!r}')
+			raise WebswitchError(f'Error performing action: {e!r}')
 
+	# Define our exception handler for actions
 	def action_exception_handler(self, source: object, action: str, e: Exception, response_id: uuid.UUID = None):
 		self.logger.warning(f'Exception while dispatching for action {action} with source {source}: {e!r}')
 
 		assert isinstance(source, ChannelClient)
 
-		source.send(Message.error(f'Action error: {e!r}').extend(response_id=str(response_id)))
+		if not isinstance(e, WebswitchError):
+			e = ChannelResponseError('Unexpected exception: {e}', response=response_id)
 
-	@dispatch_info.add_action(params={})
+		# Try to set response ID even if error isn't ChannelResponseError
+		if response_id:
+			ChannelResponseError.set_guid(e, response_id)
+
+		source.send(Message.error_from_exc(e))
+
+	@add_action()
 	def action_whoami(self, client: ChannelClient):
 		new_message = Message(
 			data={'id': client.client_id},
@@ -149,23 +209,9 @@ class Channel(Router):
 
 		self.send_messages(recipients=[client], message=new_message)
 
-	@dispatch_info.add_action(params={})
+	@add_action()
 	def action_message(self, client: ChannelClient):
 		pass
-
-	@dispatch_info.add_action(params={'data': str})
-	async def action_foobar(self, client: ChannelClient, await_response: AwaitResponse, data: str):
-		client.send(Message(data={
-			'data': f'hello, you greeted me with {data}',
-			'response_id': str(await_response.guid)},
-		))
-
-		reply = await await_response(timeout=5)
-
-		client.send(Message(data={
-			'data': f"you said {reply['data']}",
-			'response_id': str(await_response.guid)},
-		))
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(

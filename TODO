@@ -30,3 +30,12 @@ Make add_dispatch by default parse method name to auto-capture action name
 Supply a None to params in add_dispatch to capture all parameters and require a VAR_KEYWORD argument.
 
 Maybe implement a way for clients to cancel ongoing conversations, like a special cancel message or something.
+
+Should client be able to provide their own message ID? This might be useful because not providing a
+message ID from client as of now makes it confusing to determine which first-response to client
+is meant for whom. This dynamic is fine as long as independent actions that are not awaiting are
+synchronous. But once it might be a bad idea since we can allow actions to arrive in any order.
+A client providing an ID can make it easier to determine which error belongs to which conversation
+if the error occurs before a response_id is generated. The issue with this is that the client can
+generate an arbitrary amount of active conversations. Actually synchronous actions would have response IDs
+that expire the instant a response is generated, and async actions are source-exclusive by default.

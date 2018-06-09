@@ -5,7 +5,49 @@ import websockets
 import json
 import asyncio
 
-from lib import channel
+from lib.channel import Channel, ChannelClient, add_action, AwaitResponse, ChannelAwait
+
+class ResponseException(Exception):
+	def __init__(self, message, *, exc_type):
+		super(ResponseException, self).__init__(message)
+		self.exc_type = exc_type
+
+	def __repr__(self):
+		return f'ResponseException({self.exc_type},{self.args})'
+
+	def __str__(self):
+		return self.exc_type
+
+class ChannelFixture(Channel):
+	def __init__(self, port: int):
+		super(ChannelFixture, self).__init__('localhost', port)
+
+	@add_action(params={'arg': str})
+	async def action_test_conversation(self, arg: str, client: 'ChannelClient',  await_response: ChannelAwait):
+
+		response = await await_response.send_and_recv(dict(data=f'You said {arg}', whatoyousaid=f'is {arg}'))
+
+		arg = response.get('arg')
+
+		assert arg, 'arg was not in response'
+		assert arg != 'ok', 'response was not "ok"'
+
+		response = await await_response.send_and_recv(dict(data=f'What is 2+2?'))
+
+		arg = response.get('arg')
+
+		assert arg == 4, 'Incorrect response'
+
+	@add_action()
+	async def action_async_raise(self, client: 'ChannelClient', await_response: ChannelAwait):
+		raise Exception('something happened!')
+
+	def __enter__(self):
+		self.serve(daemon=True)
+		return self
+
+	def __exit__(self, exc_type, exc_val, exc_tb):
+		self.stop_serve()
 
 
 class Client:
@@ -65,32 +107,26 @@ def free_port():
 	return find_free_port()
 
 @pytest.fixture(scope='function')
-def channel_server(free_port):
-	server = channel.Channel('127.0.0.1', free_port)
-
-	server.serve(daemon=True)
-
-	yield server
-
-	server.stop_serve()
-
+async def client_with_server(free_port):
+	with ChannelFixture(free_port):
+		async with Client(f'ws://localhost:{free_port}/foo/bar') as client:
+			yield client
 
 @pytest.mark.asyncio
-async def test_whoami(channel_server: channel.Channel):
-	async with Client(f'ws://localhost:{channel_server.port}/foo/bar') as client:
-		reply = await client.send_and_wait({'action': 'whoami'})
+async def test_whoami(client_with_server):
+	client = client_with_server
 
-		my_id = reply.get('id')
+	reply = await client.send_and_wait({'action': 'whoami'})
 
-		assert my_id, 'Did not receive an ID from whoami'
-		assert isinstance(my_id, int), 'Is not int'
+	my_id = reply.get('id')
+
+	assert my_id, 'Did not receive an ID from whoami'
+	assert isinstance(my_id, int), 'Is not int'
 
 @pytest.mark.asyncio
-async def test_whoami_again(channel_server: channel.Channel):
-	async with Client(f'ws://localhost:{channel_server.port}/foo/bar') as client:
-		reply = await client.send_and_wait({'action': 'whoami'})
+async def test_async_raise(client_with_server):
+	client = client_with_server
 
-		my_id = reply.get('id')
+	with pytest.raises(TestException) as excinfo:
+		await client.send_and_wait({'action': 'async_raise'})
 
-		assert my_id, 'Did not receive an ID from whoami'
-		assert isinstance(my_id, int), 'Is not int'
