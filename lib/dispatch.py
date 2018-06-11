@@ -1,18 +1,38 @@
-from typing import Callable, Dict, Type, Tuple, Optional, Union
+from typing import Callable, Dict, List, Type, Tuple, Optional, Union, NamedTuple, Iterable, Any
 from threading import Lock
 import asyncio
 import uuid
 import inspect
-from lib.event_loop import EventLoopThread
 import re
 import logging
+from copy import deepcopy
+
+from lib.event_loop import EventLoopThread
 
 
-# TODO: Add timeout to await_dispatch and 'bounding' parameters to prevent a single
-# TODO: connection from constantly creating pending coroutines.
+class ParameterSet(NamedTuple):
+	"""
+	NamedTuple that defines an action's exposed parameters (ones that provided at time of dispatch)
+	and an action's intrinsic parameters (given to the action by the user of ResponseDispatcher
+	through argument hooks)
+	"""
+	exposed: Dict[str, Type] = dict()
+	intrinsic: Dict[str, Type] = dict()
+
+	def all(self):
+		return {**self.exposed, **self.intrinsic}
+
+	def __add__(self, other: 'ParameterSet'):
+		return ParameterSet(
+			exposed={**self.exposed, **other.exposed},
+			intrinsic={**self.intrinsic, **other.intrinsic},
+		)
+
 # TODO: When sending errors, provide the response_id if possible
 # TODO: For coroutine actions, perhaps implement a sort of session heartbeat for possible
 # TODO: long periods of waiting?
+
+
 class ResponseDispatcher(object):
 	"""
 	Asyncio based message dispatcher. Classes can use the `add_action()` decorator to
@@ -41,75 +61,76 @@ class ResponseDispatcher(object):
 	just need to ensure clients must provide a response ID if they're responding to that particular action.
 
 	To await a response, first make sure the action's method is a coroutine and access the awaitable through
-	an always-provided 'await_response` argument:
+	an always-provided 'await_dispatch` argument:
 
 		@dispatch.add_action('status', params={'device': str})
-		async def status_action(self, device: str, await_response: AwaitResponse):
+		async def status_action(self, device: str, await_dispatch: AwaitDispatch):
 			do_something()
 
-			response = await await_response({'confirmation': bool})
+			response = await await_dispatch({'confirmation': bool})
 
 			do_something
 	"""
 
-	reserved_params = {'await_response'}
+	reserved_params = {'await_dispatch'}
 
 	latest_id = 0
 
 	def __init__(
 		self,
-		common_params: Dict[str, Type],
 		instance: object,
+		common_params: ParameterSet,
 		exception_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], None],
+		complete_handler: Callable[[object, str, Any, Optional[uuid.UUID]], None] = None,
 		argument_hook: Callable[[Dict, object, 'Action'], Dict] = None,
+		common_async_params: ParameterSet = ParameterSet(),
 	):
 		"""
-		:param common_params: Common parameters that this dispatcher will include in addition to each action's individual
-		params.
 		:param instance: Value of the 'self' parameter when dispatching actions.
+		:param common_params: Common parameters that this dispatcher will include in addition to each action's individual
+		params for non-asynchronous actions
 		:param exception_handler: Handler to call when an a dispatched action raises an exception.
 		:param argument_hook: Hook to call to modify arguments before finally dispatching action. Useful to modify
-		things like AwaitResponse object.
+		things like AwaitDispatch object.
+		:param common_async_params: Common parameters that this dispatcher will include in addition to each action's individual
+		params for asynchronous actions
 		"""
 		ResponseDispatcher.latest_id += 1
 		self.id = ResponseDispatcher.latest_id
 
-		self._verify_param_names(common_params)
+		self.instance = instance
 
-		self.common_params = common_params
+		# Verify params
+		self._validate_param_set(common_params)
+		self._validate_param_set(common_async_params)
+
+		self.async_params = common_async_params
+		self.non_async_params = common_params
 
 		self.loop_thread = None  # type: EventLoopThread
 
-		self._await_responses = {}  # type: Dict[Tuple[str, uuid.UUID], 'AwaitResponse']
-		self._active_sources = {}  # type: Dict[Tuple[str, object], 'AwaitResponse']
+		self._await_dispatches = {}  # type: Dict[Tuple[str, uuid.UUID], 'AbstractAwaitDispatch']
+		self._active_sources = {}  # type: Dict[Tuple[str, object], 'AbstractAwaitDispatch']
 		self._lock = Lock()
 
 		self._stopping = False
 
 		self._exc_handler = exception_handler
+		self._complete_handler = complete_handler
 
 		self._arg_hook = argument_hook  # type: Callable[[Dict, object, 'Action'], Dict]
 
 		self.actions = {}  # type: Dict[str, 'Action']
 
-		for name, attr in inspect.getmembers(instance, lambda m: hasattr(m, Action.func_attr_tag)):
-			action = getattr(attr, Action.func_attr_tag).clone()
-			action.instance = instance
-			action.params = {**self.common_params, **action.params}
-
-			if action.name in self.actions:
-				raise Exception(f'Dispatched function {action.name!r} already exists')
-
-			self.actions[action.name] = action
-
-
 		self.logger = logging.getLogger(f'ResponseDispatch:{self.id}')
 		self.logger.setLevel(logging.DEBUG)
 		self.logger.debug(f'Creating {self!r}')
 
+		self._build_actions()
+
 	def __repr__(self):
-		params = ','.join(f'{param}:{type_}' for param, type_ in self.common_params.items())
-		return f'ResponseDispatch(id:{self.id}, params:{params})'
+		params = ','.join([str(self.non_async_params), str(self.async_params)])
+		return f'ResponseDispatch(id:{self.id}, params:({params}))'
 
 	def __str__(self):
 		return repr(self)
@@ -125,13 +146,13 @@ class ResponseDispatcher(object):
 	def stop(self):
 		self._stopping = True
 
-		pending = self._await_responses.values()
+		pending = self._await_dispatches.values()
 
 		if pending:
 			self.logger.info(f'Cancelling {len(pending)} pending coroutine actions')
 
-			for await_response in pending:
-				future = await_response.get_current_future()
+			for providers in pending:
+				future = providers.get_await_dispatch().get_current_future()
 				if future:
 					future.cancel()
 
@@ -139,87 +160,153 @@ class ResponseDispatcher(object):
 		self.loop_thread.shutdown_loop()
 		self.loop_thread.join()
 
-	def _set_await_response(self, source: object, key: Tuple[str, uuid.UUID], await_response: 'AwaitResponse'):
+	def _build_actions(self):
+		self.actions.clear()
+
+		# Go through each action-having method and clone it to this ResponseDispatcher
+		for name, attr in inspect.getmembers(self.instance, lambda m: hasattr(m, Action.func_attr_tag)):
+			orig_action = getattr(attr, Action.func_attr_tag)  # type: Action
+
+			if orig_action.name in self.actions:
+				raise Exception(f'Dispatched function {orig_action.name!r} already exists')
+
+			# Combine both exposed and intrinsic
+			param_set = self.async_params if orig_action.is_coro else self.non_async_params
+
+			# Verify that action params do not conflict with ResponseDispatcher's common params
+
+			combined_action_params = param_set.all()
+
+			conflicting = list(set(combined_action_params) & set(orig_action.params))
+
+			if conflicting:
+				raise Exception(f'Action defined params {conflicting} conflict with ResponseDispatcher common params')
+
+			combined_params = {
+				**combined_action_params,
+				**orig_action.params,
+			}
+
+			missing_params = list(set(combined_params.keys()) - set(orig_action.get_func_params()))
+
+			if missing_params:
+				raise Exception(
+					f'Could not init ResponseDispatcher due to missing arguments {missing_params}'
+					f' in action {action.name!r}'
+				)
+
+			action = orig_action.clone()
+
+			action.instance = self.instance
+			action.params = combined_params
+			# Combine common intrinsics to specific action's intrinsics'
+			action.intrinsic_params = set(action.intrinsic_params) | set(param_set.intrinsic.keys())
+
+			self.actions[action.name] = action
+
+	def _set_await_dispatch(self, source: object, key: Tuple[str, uuid.UUID], provider: 'AbstractAwaitDispatch'):
 		with self._lock:
-			self._await_responses[key] = await_response
+			self._await_dispatches[key] = provider
 
 			action, uuid_ = key
 
 			action_key = (action, source)
 
-			self._active_sources[action_key] = await_response
+			self._active_sources[action_key] = provider
 
-	def delete_await_response(self, key: Tuple[str, uuid.UUID]):
+	# This is public because AwaitDispatch uses it
+	def delete_await_dispatch(self, key: Tuple[str, uuid.UUID]):
 		with self._lock:
-			await_response = self._await_responses[key]
+			provider = self._await_dispatches[key]
 
-			del self._await_responses[key]
+			del self._await_dispatches[key]
 
 			action, uuid_ = key
 
-			action_key = (action, await_response.source)
+			action_key = (action, provider.get_await_dispatch().source)
 
 			del self._active_sources[action_key]
 
-			del await_response
+			del provider
 
-	def _await_response_exists(self, key: Tuple[str, uuid.UUID]):
+	def _get_await_dispatch(self, key: Tuple[str, uuid.UUID]):
 		with self._lock:
-			return key in self._await_responses
+			return self._await_dispatches.get(key)
 
 	@classmethod
-	def _verify_param_names(cls, params: Dict):
-		disallowed = set(params.keys()) & cls.reserved_params
+	def _validate_param_set(cls, param_set: ParameterSet):
+		conflicting = list(set(param_set.intrinsic.keys()) & set(param_set.exposed.keys()))
+
+		if conflicting:
+			raise Exception(f'Param set {param_set!r} has conflicting params {conflicting}')
+
+		disallowed = (set(param_set.exposed.keys()) | set(param_set.intrinsic.keys())) & cls.reserved_params
 
 		if disallowed:
-			raise Exception(f'Reserved parameters {disallowed!r} are not allowed')
+			raise Exception(f'Reserved parameters {disallowed!r} are not allowed to be defined parameters')
 
 	@classmethod
-	def _verify_params(cls, action: str, args: Dict, params: Dict[str, Type]):
-		for param, param_type in params.items():
-			if param not in args:
-				raise DispatchMissingArgumentError(f'Missing {param!r}')
+	def _verify_exposed_arguments(cls, action: 'Action', args: Dict):
+		"""
+		Verifies that the given arguments are valid for the action without taking into account any intrinsics
+		and type checking.
+		"""
+		invalid_args = list(set(action.intrinsic_params) & set(args.keys()))
 
+		if invalid_args:
+			raise DispatchArgumentError(f'Specified intrinsic parameters: {invalid_args}')
+
+		exposed_param_names = set(action.params.keys()) - set(action.intrinsic_params)
+
+		missing_params = list(exposed_param_names - set(args.keys()))
+
+		if missing_params:
+			raise DispatchMissingArgumentError(f'Missing arguments for parameter {missing_params}')
+
+	@classmethod
+	def _verify_full_arguments(cls, action_name: str, params: Dict[str, Type], args: Dict):
+		"""
+		Verifies that the given arguments are ready to be dispatched and valid for the given parameters and types.
+		"""
+
+		missing_params = list(set(params.keys()) - set(args.keys()))
+
+		if missing_params:
+			raise DispatchMissingArgumentError(f'Missing arguments for parameter {missing_params}')
+
+		for param, param_type in params.items():
 			value = args.get(param)
 
 			if not isinstance(value, param_type):
 				raise DispatchArgumentError(
-					f'Invalid type provided for action {action!r}: '
+					f'Invalid type provided for action {action_name!r}: '
 					f'{value!r} is not a {param_type}'
 				)
 
-	def add(self, action_name: str, action: 'Action'):
-		if action_name in self.actions:
-			raise Exception(f'Action {action_name!r} already exists in dispatch')
-
-		self._verify_param_names(action.params)
-
-		self.actions[action_name] = action
-
-	def await_response(
+	def await_dispatch(
 			self,
-			await_response: 'AwaitResponse',
+			await_dispatch: 'AwaitDispatch',
 			params: Dict[str, Type],
 			timeout: float = None,
 	) -> asyncio.Future:
 		"""
-		Prepares AwaitResponse object and create a future to await on
+		Prepares AwaitDispatch object and create a future to await on
 		"""
 		if self._stopping:
 			raise DispatchStopping()
 
 		future = self.loop_thread.event_loop.create_future()  # type: asyncio.Future
-		await_response.set(future, params)
+		await_dispatch.set(future, params)
 
-		self.logger.debug(f'Awaiting {await_response!r}')
+		self.logger.debug(f'Awaiting {await_dispatch!r}')
 
 		if timeout is not None:
 			# Creating the timeout should be relatively safe. The only places where it can be cancelled is next dispatch
-			# or cancel requests. Next dispatch must occur next event since this await_response itself is an event. Cancel
+			# or cancel requests. Next dispatch must occur next event since this await_dispatch itself is an event. Cancel
 			async def async_timeout():
 				await asyncio.sleep(timeout, loop=self.loop_thread.event_loop)
 				future.set_exception(DispatchAsyncTimeout())
-				self.logger.warning(f'Awaiting response {await_response} timed out in {timeout}')
+				self.logger.warning(f'Awaiting response {await_dispatch} timed out in {timeout}')
 
 			# TODO: Maybe we can possibly be sure that we can be safe if the dispatch class stops before
 			# TODO: create_timeout_callback() is called by using the result of run_coroutine_threadsafe to cancel
@@ -229,18 +316,53 @@ class ResponseDispatcher(object):
 				self.logger.debug(f'Also awaiting response with timeout of {timeout}')
 				asyncio.sleep(timeout)
 				timeout_future = asyncio.ensure_future(async_timeout(), loop=self.loop_thread.event_loop)
-				await_response.set_timeout_future(timeout_future)
+				await_dispatch.set_timeout_future(timeout_future)
 
 			self.loop_thread.call_soon_threadsafe(create_timeout_callback)
 
 		return future
+
+	def _ensure_exclusive(self, action: 'Action', source: object):
+		"""
+		Given an action and a source, if the action is exclusive cancel any pending actions that are
+		awaiting on an AwaitDispatch.
+		:param action:
+		:param source:
+		:return:
+		"""
+		if action.exclusive_async:
+			# If it is then we need to check for in-flight DispatchResponses for the current action and source
+			# and cancel them
+
+			source_key = (action.name, source)
+
+			provider = self._active_sources.get(source_key)
+
+			if provider is not None:
+				pending_await = provider.get_await_dispatch()
+
+				future = pending_await.get_current_future()
+
+				if future:
+					self.logger.info(f'Cancelling pending exclusive {action.name!r} action')
+					# Mark as removed so done callback doesn't try to remove it again
+					pending_await.mark_removed()
+					# Immediately remove it now
+					self.delete_await_dispatch((action.name, pending_await.guid))
+
+					def cancel_callback():
+						# Cancel future and timeout if any
+						future.cancel()
+						pending_await.cancel_timeout()
+
+					self.loop_thread.call_soon_threadsafe(cancel_callback)
 
 	def dispatch(self, source: object, action_name: str, args: Dict, response_id: Union[str, uuid.UUID] = None):
 		"""
 		Dispatches an action onto an instance given the name of the action and the arguments
 		associated. And optionally provide a response ID for coroutine awaiting actions.
 		:param source: An object representing the source of dispatch, can be None for no source. A source is required
-		for await responses cancel existing await responses.
+		for actions to cancel existing await dispatches of async_exclusive actions.
 		:param action_name: Action name
 		:param args: Action arguments
 		:param response_id: Guid of response session to reply to, if any
@@ -255,143 +377,122 @@ class ResponseDispatcher(object):
 
 		# TODO: Allow client to provide its own message ID.
 
-		# If there is no response ID this is a new action
+		# If no response ID is provided then generate one.
 		if response_id is None:
-			done_callback = None
-			async_dispatch_callback = None
-			response_guid = None
-			await_response = None
+			response_guid = uuid.uuid4()
 
-			# Verify parameters are correct
-			self._verify_params(action_name, args, action.params)
+			# Since we had to generate one, then this definitely a new dispatch
+			existing_ad = None
+		else:
+			# If one was given, attempt to parse it
+			try:
+				response_guid = uuid.UUID(str(response_id))
+			except ValueError:
+				raise DispatchError('Invalid response id')
+
+			dispatch_key = (action_name, response_guid)
+			existing_ad = self._get_await_dispatch(dispatch_key)
+
+		# If there is no existing_ad, then this is a new action
+		if not existing_ad:
+			cleanup_callback = None  # type: Optional[Callable, None]
+			async_dispatch_callback = None  # type: Optional[Callable[[Iterable], Any]]
+			await_dispatch = None  # type: Optional['AwaitDispatch']
+
+			# Verify parameters are correct, but not with type checking as there is a possibility
+			# of argument hooks returning correct parameter types later
+			self._verify_exposed_arguments(action, args)
 
 			# Run as coroutine if action's func is a coroutine
 			if action.is_coro:
-				# If the action calls for an await_response, provide it as an argument
-				if action.provide_await:
+				self._ensure_exclusive(action, source)
 
-					# Before making a new AwaitResponse, check to see if this action is async-exclusive
-					if action.exclusive_async:
-						# If it is then we need to check for in-flight AwaitResponses and cancel them
+				await_dispatch = AwaitDispatch(
+					source=source,
+					dispatcher=self,
+					action_name=action_name,
+					default_params=action.params,
+					guid=response_guid,
+				)
 
-						source_key = (action_name, source)
+				args['await_dispatch'] = await_dispatch
 
-						pending_await = self._active_sources.get(source_key)
+				# Prepare the AwaitDispatch
+				self._set_await_dispatch(source, (action_name, await_dispatch.guid), await_dispatch)
 
-						if pending_await is not None:
-							future = pending_await.get_current_future()
-							if future:
-								self.logger.info(f'Cancelling pending exclusive {action_name!r} action')
-								# Mark as removed so done callback doesn't try to remove it again
-								pending_await.mark_removed()
-								# Immediately remove it now
-								self.delete_await_response((action_name, pending_await.guid))
+				self.logger.debug(f'Action is coroutine, created AwaitDispatch: {await_dispatch}')
 
-								def cancel_callback():
-									# Cancel future and timeout if any
-									future.cancel()
-									pending_await.cancel_timeout()
+				# Callback to destroy AwaitDispatch
+				def remove_await_callback():
+					self.logger.debug(f'Action coroutine completed, removing {await_dispatch}')
+					await_dispatch.remove_and_cancel_timeout()
 
-								self.loop_thread.call_soon_threadsafe(cancel_callback)
+				cleanup_callback = remove_await_callback
 
-					await_response = AwaitResponse(
-						source=source,
-						dispatcher=self,
-						action_name=action_name,
-						default_params=action.params
-					)
+				async def coro_dispatch(dispatch_args) -> Any:
+					return await action.func(action.instance, **dispatch_args)
 
-					response_guid = await_response.guid
-
-					args['await_response'] = await_response
-
-					key = (action_name, await_response.guid)
-
-					# Prepare the AwaitResponse
-					self._set_await_response(source, key, await_response)
-
-					self.logger.debug(f'Action is coroutine, created AwaitResponse: {await_response}')
-
-					# Callback to destroy AwaitResponse
-					def remove_await_callback(_: asyncio.Future):
-						self.logger.debug(f'Action coroutine completed, removing {await_response}')
-						await_response.remove_and_cancel_timeout()
-
-					done_callback = remove_await_callback
-
-				async def async_dispatch_callback(dispatch_args):
-					await action.func(action.instance, **dispatch_args)
+				async_dispatch_callback = coro_dispatch
 			else:
-				async def async_dispatch_callback(dispatch_args):
-					action.func(action.instance, **dispatch_args)
+				async def call_dispatch(dispatch_args) -> Any:
+					return action.func(action.instance, **dispatch_args)
 
-			event_loop = self.loop_thread.event_loop
+				async_dispatch_callback = call_dispatch
 
+			# Co-routine to run regardless of synchronocity
 			async def dispatch_async():
 				try:
 					# If a hook is defined, run it and get new arguments
 					if self._arg_hook:
 						passed_args = self._arg_hook(args, source, action)
-
-						if await_response:
-							# If not the same await_response was returned, validate and
-							# replace it as the original AwaitResponse
-
-							possibly_new_ar = passed_args['await_response']
-
-							if possibly_new_ar is not await_response:
-								if not isinstance(possibly_new_ar, AwaitResponse):
-									raise DispatchArgumentError(
-										'Argument hook override AwaitResponse with a non-AwaitResponse object'
-									)
-
-								if possibly_new_ar.guid != await_response.guid:
-									raise DispatchArgumentError(
-										'Overridden AwaitResponse has different guid than original '
-										f'(original) {await_response.guid} != (new) {possibly_new_ar.guid}'
-									)
-
-								key = (action_name, await_response.guid)
-
-								self._set_await_response(source, key, possibly_new_ar)
-
-								self.logger.info(f'Replaced old {await_response!r} with new {possibly_new_ar!r}')
 					else:
 						passed_args = args
 
-					await async_dispatch_callback(passed_args)
+					# Verify new arguments with type checking
+					self._verify_full_arguments(action.name, action.params, passed_args)
+
+					# Strip out only what isn't needed if action has no kwargs
+					if not action.has_kwargs:
+						passed_args = {k: passed_args[k] for k in passed_args.keys() & action.params.keys()}
+
+					return await async_dispatch_callback(passed_args)
 
 				except Exception as e:
+					# Call exception handler if something happened
 					def exc_callback(exc):
 						self._exc_handler(source, action_name, exc, response_guid)
 
-					event_loop.call_soon(exc_callback, e)
+					self.loop_thread.call_soon_threadsafe(exc_callback, e)
+					# Raise so future does not invoke complete handler
+					raise
+
+			def done_callback(done_future: asyncio.Future):
+				# Call cleanup handler if any
+				if cleanup_callback:
+					cleanup_callback()
+
+				# Call done handler if done
+				if self._complete_handler and done_future.done():
+					# Make sure handler is called in our event loop
+					# TODO: Do we need to do this event loop deferring elsewhere?
+					self.loop_thread.call_soon_threadsafe(
+						self._complete_handler,
+						source,
+						action_name,
+						done_future.result(),
+						response_guid
+					)
 
 			fut = self.loop_thread.run_coroutine_threadsafe(dispatch_async())
 
-			if done_callback:
+			if cleanup_callback or self._complete_handler:
 				fut.add_done_callback(done_callback)
 
-		# If this is a coroutine in progress, then continue its await_response
-		elif action.is_coro and action.provide_await:
-
-			# Try to parse given response id
-			try:
-				key = (action_name, uuid.UUID(str(response_id)))
-			except ValueError:
-				raise DispatchError('Invalid response id')
-
-			# Try to retrieve AwaitResponse
-
-			await_response = self._await_responses.get(key)
-
-			if await_response is None:
-				raise DispatchError('Response session does not exist')
-
+		# If this is a coroutine in progress, then continue its await_dispatch
+		elif action.is_coro:
 			# Make sure that a future was even set
-
-			future = await_response.get_current_future()
-			params = await_response.get_current_params()
+			future = existing_ad.get_current_future()
+			params = existing_ad.get_current_params()
 
 			if not future or params is None:
 				raise DispatchError('No response has been awaited')
@@ -401,14 +502,18 @@ class ResponseDispatcher(object):
 
 			# Verify parameters and issue callback
 
-			self.logger.debug(f'Dispatching continuation of {await_response}')
+			self.logger.debug(f'Dispatching continuation of {existing_ad}')
 
-			self._verify_params(action_name, args, await_response.get_current_params())
+			self._verify_full_arguments(
+				action_name=action_name,
+				params=existing_ad.get_current_params(),
+				args=args,
+			)
 
 			def set_future_result_callback():
-				self.logger.debug(f'Fulfilled {await_response}')
-				# Cancel timeout since no exceptions rose
-				await_response.cancel_timeout()
+				self.logger.debug(f'Fulfilled {existing_ad}')
+				# Cancel timeout since no exceptions arose
+				existing_ad.cancel_timeout()
 				future.set_result(args)
 
 			self.loop_thread.call_soon_threadsafe(set_future_result_callback)
@@ -425,20 +530,35 @@ def add_action(
 	action_name: str = None,
 	exclusive_async: bool = True,
 	params: Dict[str, Type] = None,
+	intrinsic_params: Iterable[str] = (),
 	timeout: float = None,
 ) -> Callable:
 	"""
 	Decorator to add actions from methods. This decorator MUST be called with
 	an argument list, even if empty.
-	:param action_name:
-	:param exclusive_async:
-	:param params:
+	:param action_name: Specify the name of the action that the client can invoke. If not specified
+	then the action_name is extracted from the method name as 'X_action'
+	:param exclusive_async: Whether or not this action is exclusively asynchronous per source. Otherwise
+	a single client can dispatch an unlimited amount of this asynchronous action that may or may not complete.
+	:param params: Dict of parameter name strings to types
+	:param intrinsic_params: Iterable of parameter name strings specified in `params` that are intrinsic. Meaning
+	these parameters are given by the user of the ResponseDispatcher instance and not directly through `dispatch()`.
 	:param timeout:
 	:return:
 	"""
 
 	def decorator(func: Callable):
 		nonlocal params, action_name
+
+		params = params or {}
+
+		missing_intrinsics = list(set(intrinsic_params) - set(params.keys()))
+
+		if missing_intrinsics:
+			raise Exception(
+				f"Intrinsic parameter names {missing_intrinsics} do not refer to any params of action {action_name}'s"
+				f" decorator"
+			)
 
 		params = params or {}
 
@@ -455,32 +575,29 @@ def add_action(
 
 			action_name = match['name']
 
-		signature = inspect.signature(func)
-
-		has_kwargs = len(list(filter(lambda param: param.kind.name == 'VAR_KEYWORD', signature.parameters.values()))) > 0
+		func_parameters = inspect.signature(func).parameters
+		provided = list(func_parameters.keys())
+		has_kwargs = len(list(filter(lambda param: param.kind.name == 'VAR_KEYWORD', func_parameters.values()))) > 0
 
 		is_coro = asyncio.iscoroutinefunction(func)
 
+		# kwargs is a catch all so don't be strict about parameters if they have it
 		if not has_kwargs:
 			required = set(params.keys())
-			provided = signature.parameters.keys()
-
-			missing_params = list(required - provided)
+			missing_params = list(required - set(provided))
 
 			if missing_params:
 				raise Exception('Callable {func!r} does not provide required params: {missing_params!r}')
-
-			provide_await = is_coro and 'await_response' in provided
-		else:
-			provide_await = True
 
 		action = Action(
 			instance=None,
 			name=action_name,
 			func=func,
+			func_params=provided,
 			params=params,
+			intrinsic_params=list(intrinsic_params),
 			is_coro=is_coro,
-			provide_await=provide_await,
+			has_kwargs=has_kwargs,
 			exclusive_async=exclusive_async,
 			timeout=timeout,
 		)
@@ -493,30 +610,44 @@ def add_action(
 
 
 class Action(object):
+	"""
+	Metadata generated by `add_action` generator. This metadata is eventually cloned and common params
+	from ResponseDispatcher are added to the clone.
+	"""
 	func_attr_tag = '__dispatch_action'
 
 	def __init__(
 		self,
-		instance: object,
-		name: str,
-		func: Callable,
-		params: Dict[str, Type],
-		is_coro: bool,
-		provide_await: bool,
-		exclusive_async: bool = True,
+		instance: object = None,
+		name: str = None,
+		func: Callable = None,
+		func_params: List[str] = None,
+		params: Dict[str, Type] = None,
+		intrinsic_params: List[str] = None,
+		is_coro: bool = None,
+		has_kwargs: bool = None,
+		exclusive_async: bool = None,
 		timeout: float = None,
 	):
 		self.instance = instance
 		self.name = name
 		self.func = func
 		self.params = params
+		self.intrinsic_params = intrinsic_params
 		self.is_coro = is_coro
-		self.provide_await = provide_await
+		self.has_kwargs = has_kwargs
 		self.exclusive_async = exclusive_async
 		self.timeout = timeout
+		self.func_params = func_params
 
-	def clone(self):
-		return Action(**self.__dict__)
+	def clone(self) -> 'Action':
+		copy = Action()
+		copy.__dict__ = deepcopy(self.__dict__)
+
+		return copy
+
+	def get_func_params(self) -> List[str]:
+		return self.func_params
 
 	def __repr__(self):
 		return f'Action(func: {self.instance.__class__.__name__}.{self.func.__name__})'
@@ -525,7 +656,15 @@ class Action(object):
 		return repr(self)
 
 
-class AwaitResponse(object):
+class AbstractAwaitDispatch(object):
+	def get_await_dispatch(self) -> 'AwaitDispatch':
+		raise NotImplemented()
+
+	def __call__(self, params: Dict = None, timeout: float = None) -> asyncio.Future:
+		return self.get_await_dispatch()(params=params, timeout=timeout)
+
+
+class AwaitDispatch(AbstractAwaitDispatch):
 	"""
 	A callable object that returns a future for awaiting for responses in a single action.
 	"""
@@ -535,7 +674,7 @@ class AwaitResponse(object):
 		source: object,
 		action_name: str,
 		default_params: Dict[str, Type],
-		guid: uuid.UUID = None,
+		guid: uuid.UUID,
 	):
 		self.dispatcher = dispatcher
 		self.source = source
@@ -544,7 +683,7 @@ class AwaitResponse(object):
 		self._current_future = None  # type: asyncio.Future
 		self._current_params = None  # type: Dict[str, Type]
 		self._timeout_future = None  # type: asyncio.Future
-		self.guid = guid or uuid.uuid4()
+		self.guid = guid
 
 		self.removed = False
 
@@ -553,10 +692,10 @@ class AwaitResponse(object):
 
 	def remove_and_cancel_timeout(self):
 		if self.removed:
-			self.dispatcher.logger.info('AwaitResponse already removed')
+			self.dispatcher.logger.info('AwaitDispatch already removed')
 			return
 
-		self.dispatcher.delete_await_response((self.action_name, self.guid))
+		self.dispatcher.delete_await_dispatch((self.action_name, self.guid))
 		self.mark_removed()
 
 		self.cancel_timeout()
@@ -579,15 +718,18 @@ class AwaitResponse(object):
 	def get_current_params(self) -> Dict[str, Type]:
 		return self._current_params
 
-	def __call__(self, params=None, timeout: float = None):
+	def __call__(self, params: Dict =None, timeout: float = None) -> asyncio.Future:
 		params = self.default_params if params is None else params
-		return self.dispatcher.await_response(self, params=params, timeout=timeout)
+		return self.dispatcher.await_dispatch(self, params=params, timeout=timeout)
 
 	def __repr__(self):
-		return f'AwaitResponse(action: {self.action_name!r}, guid: {self.guid}, param: {self._current_params!r})'
+		return f'AwaitDispatch(action: {self.action_name!r}, guid: {self.guid}, param: {self._current_params!r})'
 
 	def __str__(self):
 		return repr(self)
+
+	def get_await_dispatch(self) -> 'AwaitDispatch':
+		return self
 
 
 class DispatchError(Exception):
@@ -608,7 +750,7 @@ class DispatchStopping(DispatchError):
 
 class DispatchArgumentError(DispatchError):
 	def __init__(self, argument_name: str, *args, **kwargs):
-		super(DispatchArgumentError, self).__init__(*args, **kwargs)
+		super(DispatchArgumentError, self).__init__(argument_name, *args, **kwargs)
 
 		self.argument_name = argument_name
 
@@ -616,4 +758,3 @@ class DispatchArgumentError(DispatchError):
 class DispatchMissingArgumentError(DispatchArgumentError):
 	def __init__(self, argument_name: str, *args, **kwargs):
 		super(DispatchArgumentError, self).__init__(argument_name=argument_name, *args, **kwargs)
-

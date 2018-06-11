@@ -39,3 +39,116 @@ A client providing an ID can make it easier to determine which error belongs to 
 if the error occurs before a response_id is generated. The issue with this is that the client can
 generate an arbitrary amount of active conversations. Actually synchronous actions would have response IDs
 that expire the instant a response is generated, and async actions are source-exclusive by default.
+
+When we put back 'provide_await', we can allow dispatch users to define async
+actions that do not wish to use await_dispatch. For now this can be less complicated.
+Actually:
+    Also when we cancel in-flight actions that are exclusive, we do this by cancelling the future that
+    the action coroutine awaits on that is stored in AwaitDispatch. This generates an exception at the site
+    of the `await`. But what happens when we cancel an exclusive_async in the future that does not have
+    an AwaitDispatch to await on? We'd have to store the future of the coroutine itself and cancel it. But
+    that would present itself with a bad programming pattern that tells the user if you don't want to do an
+    AwaitDispatch and that's fine, but you'll have no opportunity to wrap an await in a try-except to do
+    cleanup. So in all, async actions with no opt-in for AwaitDispatch-ing will have the action coroutine cancelled
+    with no oppurtunity to do clean up.
+
+
+I want to be able to provide anyone who uses the Router class to be able to wrap AwaitDispatch objects for their actions
+and provide extra methods like sending messages over websocket to a particular ID or something. Right now if an action's
+method is async, it is *required* to have an await_dispatch parameter. This is problematic since wrapping an AwaitDispatch
+and replacing it in the ResponseDispatcher's argument hook will alter the type of parameter and will cause the add_action
+decorator to incorrectly assert that an object of type AwaitDispatch is passed but in actuality the Router subclass
+will provide a wrapper of a different type.
+
+    Normal Router:
+
+        class Foo(Router):
+            ...
+            @add_action()
+            async def bar_action(await_dispatch: AwaitDispatch):
+                # await_dispatch is guaranteed to be of type AwaitDispatch
+                do_stuff()
+                await await_dispatch()
+
+    Router with wrapped AwaitDispatch
+        class FooDispatch(AbstractAwaitDispatch):
+            def __init__(self, original: AwaitDispatch):
+                self.original = original
+
+            def get_await_dispatch(self):
+                return self.original
+
+            async def do_something_foo(self):
+                ....
+
+        class Foo(Router):
+            ...
+            def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
+                await_dispatch = args.get('await_dispatch')
+
+                # Intercept and wrap await_dispatch in our own dispatch
+                if await_dispatch:
+                    copy = args.copy()
+                    copy.update(await_dispatch=FooDispatch(await_dispatch))
+
+                    return copy
+
+            @add_action()
+            async def bar_action(await_dispatch: AwaitDispatch):
+                # await_dispatch is actually FooDispatch
+                do_stuff()
+                await await_dispatch.do_something_foo()
+
+    So the problem is when writing actions in an IDE or using a python static type analyzer, the action will fail to
+    verify at runtime (if such mechanism is in place) as bar_action will receive a FooDispatch at runtime and not
+    an AwaitDispatch. Ideally we'd want to be able to have access to an await_dispatch
+    in our hook but also not be obligated to provide it as a parameter in our actions so that their signatures are
+    not cluttered. This is the ideal solution:
+        class FooDispatch(AbstractAwaitDispatch):
+            def __init__(self, original: AwaitDispatch):
+                self.original = original
+
+            def get_await_dispatch(self):
+                return self.original
+
+            async def do_something_foo(self):
+                ....
+
+        class Foo(Router):
+            ...
+            def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
+                await_dispatch = args.get('await_dispatch')
+
+                # Intercept and wrap await_dispatch in our own dispatch
+                if await_dispatch:
+                    copy = args.copy()
+                    copy.update(await_dispatch=FooDispatch(await_dispatch))
+
+                    return copy
+
+            @add_action()
+            async def bar_action(foo: FooDispatch):
+                do_stuff()
+                # Nice and apparent
+                await foo.do_something_foo()
+
+        Here bar_action does not care about AwaitDispatch and only cares about the wrapper that the Foo router provides.
+
+        Obviously the required change here is to no longer require async methods to define an await_dispatch. However I
+        find this breaks the design pattern of explicitness. The user that is subclassing the Router class will have
+        to *know* about the *now implicit* await_dispatch in documentation rather than being yelled at at runtime when
+        the decorator fails to assert that await_dispatch was not defined in an async action's method signature.
+
+When defining common parameters for actions when creating a ResponseDispatcher, we may have a different set of common
+parameters for async functions, so provide that as an extra argument in the ResponseDispatcher constructor.
+
+Also remember when we had parameter verification that would use an already created ResponseDispatcher, but we now removed
+the requirement to make a static field to access the add_action decorator as an action? We have no parameter verification
+on decoration because there is no ResponseDispatcher object when the decorators are run during class definition. So
+let's add additional verification when the ResponseDispatcher object is created.
+
+Also we should distinguished between common parameters that are shared simply because they are common across different
+actions and shared because they are inherent to the Router subclass and are provided without explicit dispatch arguments.
+If we do not distinguish then explicit dispatch arguments can provide these inherent parameters and may cause security
+issues. (Like providing an auth token as a common param that is internal to the Router sub-class)
+

@@ -25,17 +25,17 @@ class Client extends EventEmitter {
     }
 
     handleOpen(data) {
-        console.info('Client socket opened, state:', this.ws.readyState);
+        console.info('Connection socket opened, state:', this.ws.readyState);
         this.emit('open', data);
     }
 
     handleError(data) {
-        console.error('Client socket error occurred');
+        console.error('Connection socket error occurred');
         this.emit('error', data);
     }
 
     handleClose(data) {
-        console.info('Client Socket closed', data);
+        console.info('Connection Socket closed', data);
         this.emit('close', data);
     }
 

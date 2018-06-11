@@ -4,19 +4,29 @@ import traceback
 import uuid
 import argparse
 
-from lib.dispatch import ResponseDispatcher, AwaitResponse, add_action, Action
-from lib.webswitch import Client, Router, Message, WebswitchError, WebswitchConnectionError, WebswitchResponseError
+from lib.dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
+from lib.router.errors import RouterError, RouterResponseError, RouterConnectionError
+from lib.router.connection import Connection
+from lib.router.router import Router
+from lib.message import Message
 
 import logging
 
+# TODO: What if instead of an error_type for RouterErrors, have an array of error_types?
 
-class ChannelResponseError(WebswitchResponseError):
-	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitResponse'], **data):
-		super(ChannelResponseError, self).__init__(message=message, **data)
-		self.set_guid(response)
+
+class ChannelError(RouterError):
+	def __init__(self, message: str):
+		super(ChannelError, self).__init__(error_type='channel_error', message=message)
+
+
+class ChannelResponseError(RouterResponseError):
+	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], **data):
+		super(ChannelResponseError, self).__init__(message=message, error_type='channel_response', **data)
+		self.set_guid(self, response)
 
 	@staticmethod
-	def set_guid(exception: WebswitchError, response: Union[uuid.UUID, 'AwaitResponse']):
+	def set_guid(exception: RouterError, response: Union[uuid.UUID, 'AwaitDispatch']):
 		exception.error_data['response_id'] = response
 
 
@@ -31,79 +41,97 @@ class ClientACL:
 			setattr(self, key, val)
 
 
-class ChannelClient(Client):
-	def __init__(self, router: 'Channel', **kwargs):
-		super(ChannelClient, self).__init__(router=router)
+# TODO: Create a ChannelClient class that can have multiple Connections
+class ChannelClient(object):
+	def __init__(self, channel: 'Channel', conn: Optional[Connection], **kwargs):
+		self.channel = channel
+		self.conn = conn
 		self.acl = ClientACL(**kwargs)
 		self.name = None  # type: str
 
-class ChannelAwait(AwaitResponse):
-	def __init__(self, client: ChannelClient, original: AwaitResponse):
-		super(ChannelAwait, self).__init__(
-			dispatcher=original.dispatcher,
-			source=original.source,
-			action_name=original.action_name,
-			default_params=original.default_params,
-			guid=original.guid
-		)
+	def send(self, message: Message, response_id: Optional[uuid.UUID]):
+		if response_id is not None:
+			message = message.clone()
+			message.data.update(response_id=str(response_id))
 
+		self.channel.send_messages([self.conn], message)
+
+
+class Conversation(AbstractAwaitDispatch):
+	def __init__(self, client: ChannelClient, original: AwaitDispatch):
+		self.await_dispatch = original
 		self.client = client
 
-	async def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
-		data.update(response_id=str(self.guid))
+	def get_await_dispatch(self):
+		return self.await_dispatch
 
-		self.client.send(Message(data=data))
+	def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+		self.client.send(Message(data=data), self.await_dispatch.guid)
+		return self(params=params, timeout=timeout)
 
-		return await self(params=params, timeout=timeout)
 
 class Channel(Router):
+	_common_intrinsic_params = {
+		'client': ChannelClient
+	}
+	_common_exposed_params = {}
+
+	non_async_params = ParameterSet(exposed=_common_exposed_params, intrinsic=_common_intrinsic_params)
+	async_params = ParameterSet(
+		exposed=_common_exposed_params,
+		intrinsic={
+			**_common_intrinsic_params,
+			'convo': Conversation,
+		}
+	)
+
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
 		super(Channel, self).__init__(host, port, max_queue_size)
-		self.channels = {}  # type: Dict[Tuple[str, str], Set[Client]]
+		self.channels = {}  # type: Dict[Tuple[str, str], Set[ChannelClient]]
+		self.conn_to_client = {}  # type: Dict[Connection, ChannelClient]
 
 		self.host, self.port = host, port
 
-		self.broadcast_client = ChannelClient(self)
-
-
-		self.action_handlers = {
-			'whoami': (self.action_whoami, {}),
-		}
+		self.broadcast_client = ChannelClient(self, None)
 
 		self.dispatcher = ResponseDispatcher(
+			common_params=self.non_async_params,
+			common_async_params=self.async_params,
 			instance=self,
 			exception_handler=self.action_exception_handler,
+			complete_handler=self.action_complete_handler,
 			argument_hook=self.argument_hook,
-			common_params={'client': ChannelClient}
 		)
 
 		self.logger = logging.getLogger(f'ChannelRouter:{self.id}')
 		self.logger.setLevel(logging.DEBUG)
 		self.logger.info('Creating channel server')
 
-	def handle_start(self):
-		self.dispatcher.start()
-
-	def handle_stop(self):
-		self.dispatcher.stop()
-
 	def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
-		await_response = args.get('await_response')
+		await_dispatch = args.get('await_dispatch')
 
-		if await_response:
+		if await_dispatch:
 			assert isinstance(source, ChannelClient)
+			assert isinstance(await_dispatch, AwaitDispatch)
 
-			new_ar = ChannelAwait(client=source, original=await_response)
+			new_conversation = Conversation(client=source, original=await_dispatch)
 
+			# TODO: Having to use a class specific copy method for subclasses seems awkward, instead
+			# TODO: why not provide an interface for
 			new_args = args.copy()
-			new_args.update(await_response=new_ar)
+			new_args.update(convo=new_conversation)
 
 			return new_args
 
 		return args
 
+	def on_start(self):
+		self.dispatcher.start()
 
-	def handle_new(self, client: Client, path: str) -> Optional[Client]:
+	def on_stop(self):
+		self.dispatcher.stop()
+
+	def on_new(self, connection: Connection, path: str) -> None:
 		groups = {'channel': None, 'room': None}
 
 		try:
@@ -115,9 +143,9 @@ class Channel(Router):
 
 			# They absolutely must be provided, no excuses!
 			if not groups['channel'] or not groups['room']:
-				raise WebswitchError("Path must be /<channel>/<room>/")
+				raise RouterConnectionError("Path must be /<channel>/<room>/")
 
-			self.logger.debug(f'New client connection {client} with path {path!r}')
+			self.logger.debug(f'New connection {connection} with path {path!r}')
 
 			key = (groups['channel'], groups['room'])
 
@@ -130,43 +158,42 @@ class Channel(Router):
 
 				self.channels[key] = channel = set()
 
-			# Create our channel client instance and return it
-			new_client = ChannelClient(self)
+			# Create our channel connection instance
+			new_client = ChannelClient(self, connection)
+			self.conn_to_client[connection] = new_client
 			channel.add(new_client)
 
-			self.logger.debug(f'Added web-switch client {client!r} as Channel client to {key!r}')
-
-			return new_client
+			self.logger.debug(f'Added web-switch connection {connection!r} as Channel connection to {key!r}')
 
 		except Exception as e:
-			client.close(reason=str(e))
-			return None
+			connection.close(reason=str(e))
 
-	def handle_message(self, client: Client, message: Message):
+	def on_message(self, connection: Connection, message: Message):
 		action_name = message.data.get('action')
+		client = self._get_client(connection)
 
 		if action_name is None:
-			raise WebswitchResponseError(
+			raise RouterResponseError(
 				'No action provided' if not action_name else f'Unknown action {action_name!r}'
 			)
 
 		action = self.dispatcher.actions.get(action_name)
 
 		if not action:
-			raise WebswitchResponseError(f'Invalid action {action!r}')
+			raise RouterResponseError(f'Invalid action {action_name!r}')
 
 		data = message.data.get('data') or {}
 
-		# Since we already provide a default argument 'client', remove it
+		# Since we already provide a default argument 'connection', remove it
 		params = action.params.copy()
 		del params['client']
 
 		if data is None:
 			if params:
-				raise WebswitchResponseError('No data body provided')
+				raise RouterResponseError('No data body provided')
 
 		elif not isinstance(data, dict):
-			raise WebswitchResponseError('Data body must be an object')
+			raise RouterResponseError('Data body must be an object')
 
 		response_id = message.data.get('response_id')
 
@@ -177,46 +204,65 @@ class Channel(Router):
 		try:
 			self.dispatcher.dispatch(source=client, action_name=action_name, args=data, response_id=response_id)
 
-		except WebswitchError as e:
+		except RouterError as e:
 			self.logger.warning(f'Caught error while performing action: {e!r}')
 			ChannelResponseError.set_guid(e, response_id)
 			client.send(Message.error_from_exc(e))
 
 		except Exception as e:
 			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
-			raise WebswitchError(f'Error performing action: {e!r}')
+			raise ChannelError(f'Unexpected error performing action: {e!r}')
+
+	def on_remove(self, connection: Connection):
+		# TODO: Remove and cleanup ChannelClients from whatever lists, dicts
+		pass
+
+	def _get_client(self, connection: Connection):
+		client = self.conn_to_client.get(connection)
+
+		if not client:
+			self.logger.error(f'Could not find client from connection {connection!r}')
+			raise ChannelError(f'Could not find client with given connection')
+
+		return client
 
 	# Define our exception handler for actions
-	def action_exception_handler(self, source: object, action: str, e: Exception, response_id: uuid.UUID = None):
-		self.logger.warning(f'Exception while dispatching for action {action} with source {source}: {e!r}')
+	def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
+		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
 		assert isinstance(source, ChannelClient)
 
-		if not isinstance(e, WebswitchError):
-			e = ChannelResponseError('Unexpected exception: {e}', response=response_id)
+		if not isinstance(e, RouterError):
+			e = ChannelResponseError(f'Unexpected exception: {e}', response=response_id)
 
 		# Try to set response ID even if error isn't ChannelResponseError
 		if response_id:
 			ChannelResponseError.set_guid(e, response_id)
 
-		source.send(Message.error_from_exc(e))
+		source.send(Message.error_from_exc(e), response_id)
+
+	# Define our completer when actions complete and return
+	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID = None):
+		assert isinstance(source, ChannelClient)
+
+		if isinstance(result, Dict):
+			source.send(Message(data=result), response_id)
+		else:
+			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
 
 	@add_action()
 	def action_whoami(self, client: ChannelClient):
-		new_message = Message(
-			data={'id': client.client_id},
-		)
-
-		self.send_messages(recipients=[client], message=new_message)
+		return {'id': client.conn.conn_id}
 
 	@add_action()
 	def action_message(self, client: ChannelClient):
 		pass
 
-if __name__ == '__main__':
+
+def cli_main():
 	parser = argparse.ArgumentParser(
 		description='Websocket channel-style server',
-		formatter_class=argparse.ArgumentDefaultsHelpFormatter
+		formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 	)
 
 	parser.add_argument(
@@ -241,3 +287,7 @@ if __name__ == '__main__':
 
 	router = Channel(args.host, args.port)
 	router.serve(daemon=False)
+
+
+if __name__ == '__main__':
+	cli_main()
