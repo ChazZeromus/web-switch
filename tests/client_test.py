@@ -29,7 +29,7 @@ class ChannelFixture(Channel):
 
 	@add_action()
 	async def action_async_raise(self, client: 'ChannelClient', convo: Conversation):
-		raise RouterError(error_type='foo', message='something happened!')
+		raise RouterError(error_types='foo', message='something happened!')
 
 	def __enter__(self):
 		self.serve(daemon=True)
@@ -44,9 +44,11 @@ def find_free_port():
 		s.bind(('', 0))
 		return s.getsockname()[1]
 
+
 @pytest.fixture(scope='session')
 def free_port():
 	return find_free_port()
+
 
 @pytest.fixture(scope='function')
 async def client_with_server(free_port):
@@ -54,16 +56,18 @@ async def client_with_server(free_port):
 		async with Client(f'ws://localhost:{free_port}/foo/bar') as client:
 			yield client
 
+
 @pytest.mark.asyncio
 async def test_whoami(client_with_server):
 	convo = client_with_server.convo()
 
 	reply = await convo.send_and_wait({'action': 'whoami'})
 
-	my_id = reply.get('id')
+	my_id = reply.data.get('id')
 
 	assert my_id, 'Did not receive an ID from whoami'
 	assert isinstance(my_id, int), 'Is not int'
+
 
 @pytest.mark.asyncio
 async def test_async_raise(client_with_server: Client):
@@ -72,7 +76,7 @@ async def test_async_raise(client_with_server: Client):
 	with pytest.raises(ResponseException) as excinfo:
 		await convo.send_and_wait({'action': 'async_raise'})
 
-	assert excinfo.error_type == 'foo'
+	assert 'foo' in excinfo.value.error_types
 
-# TODO: Rename router.py to router
+# TODO: Test active source cancelling
 

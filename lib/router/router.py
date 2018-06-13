@@ -18,7 +18,6 @@ from lib.message import Message
 from lib.router.connection import Connection, ConnectionList
 from lib.router.errors import RouterError, RouterConnectionError, RouterServerError
 
-
 def _route_thread(
 		message_callback: Callable[[Connection, str], None],
 		remove_callback: Callable[[Connection], None],
@@ -81,24 +80,6 @@ class Router(object):
 		self._interrupt_event = threading.Event()
 
 		self._close_lock = threading.Lock()
-
-	@staticmethod
-	def stringify_message(message: Message, **extra):
-		payload = {
-			**message.data,
-			**extra,
-		}
-
-		if message.success is not None:
-			payload['success'] = message.success
-
-		if message.error or (message.success is not None and not message.success):
-			payload['error'] = message.error
-
-		if message.error_data:
-			payload['error_data'] = message.error_data
-
-		return json.dumps(payload)
 
 	def serve(self, daemon=False):
 		self.server_thread.start()
@@ -304,7 +285,7 @@ class Router(object):
 
 	def send_messages(self, recipients: List[Connection], message: Message) -> None:
 		def async_callback():
-			payload = self.stringify_message(message)
+			payload = message.json()
 
 			for recipient in recipients:
 				asyncio.ensure_future(recipient.ws.send(payload), loop=self.event_loop)

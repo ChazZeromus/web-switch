@@ -757,4 +757,4 @@ class DispatchArgumentError(DispatchError):
 
 class DispatchMissingArgumentError(DispatchArgumentError):
 	def __init__(self, argument_name: str, *args, **kwargs):
-		super(DispatchArgumentError, self).__init__(argument_name=argument_name, *args, **kwargs)
+		super(DispatchMissingArgumentError, self).__init__(argument_name=argument_name, *args, **kwargs)

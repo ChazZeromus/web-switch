@@ -16,13 +16,14 @@ import logging
 
 
 class ChannelError(RouterError):
-	def __init__(self, message: str):
-		super(ChannelError, self).__init__(error_type='channel_error', message=message)
+	def __init__(self, message: str, **data):
+		super(ChannelError, self).__init__(message=message, **{'error_types': 'channel_error', **data})
 
 
 class ChannelResponseError(RouterResponseError):
 	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], **data):
-		super(ChannelResponseError, self).__init__(message=message, error_type='channel_response', **data)
+		super(ChannelResponseError, self).__init__(message=message, **data)
+		self.error_types.append('channel_response')
 		self.set_guid(self, response)
 
 	@staticmethod
@@ -110,6 +111,8 @@ class Channel(Router):
 	def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
 		await_dispatch = args.get('await_dispatch')
 
+		new_args = args.copy()
+
 		if await_dispatch:
 			assert isinstance(source, ChannelClient)
 			assert isinstance(await_dispatch, AwaitDispatch)
@@ -118,12 +121,13 @@ class Channel(Router):
 
 			# TODO: Having to use a class specific copy method for subclasses seems awkward, instead
 			# TODO: why not provide an interface for
-			new_args = args.copy()
 			new_args.update(convo=new_conversation)
 
-			return new_args
+		assert isinstance(source, ChannelClient)
 
-		return args
+		new_args['client'] = source
+
+		return new_args
 
 	def on_start(self):
 		self.dispatcher.start()
@@ -197,8 +201,6 @@ class Channel(Router):
 
 		response_id = message.data.get('response_id')
 
-		data = {**data, 'client': client}
-
 		# Dispatch our action
 
 		try:
@@ -206,8 +208,9 @@ class Channel(Router):
 
 		except RouterError as e:
 			self.logger.warning(f'Caught error while performing action: {e!r}')
+			# TODO: Make setting response_id not redundant
 			ChannelResponseError.set_guid(e, response_id)
-			client.send(Message.error_from_exc(e))
+			client.send(Message.error_from_exc(e), response_id=response_id)
 
 		except Exception as e:
 			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')

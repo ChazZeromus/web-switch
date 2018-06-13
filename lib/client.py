@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Dict
+import traceback
+from typing import Dict, Optional, Union
 
 import websockets
 
+from lib.message import Message
 
 class Client:
 	def __init__(self, ws_url):
@@ -29,38 +31,46 @@ class Client:
 		await self._loop_fut
 
 	@staticmethod
-	def _extract_guid(data: Dict) -> uuid.UUID:
-		response_id = data.get('response_id')
+	def _extract_guid(message: Message) -> Optional[uuid.UUID]:
+		response_id = message.data.get('response_id')
 
-		if not response_id:
-			error_data = data.get('error_data')
+		if not response_id and message.error_data:
+			error_data = message.error_data.get('error_data')
 
 			if error_data:
 				response_id = error_data.get('response_id')
+
+		if not response_id:
+			return None
 
 		return uuid.UUID(response_id)
 
 	async def _recv_loop(self):
 		async for response in self.ctx:
 			try:
-				data = json.loads(response)
+				data = json.loads(response)  # type: dict
+
+				message = Message()
+				message.load(data)
+
 				error = data.get('error')
 
-				guid = self._extract_guid(data)
+				guid = self._extract_guid(message)
 				convo = self.active_convos.get(guid)
 
 				if error:
-					error_data = error.get('error_data', {})
+					error_data = message.error_data
 
 					exc = ResponseException(error, **error_data)
 
 					if convo:
 						await convo.queue.put(exc)
 
-					raise Exception(f'Response error: {exc}')
+					raise ReceiveException(f'Error from server: {exc}')
 
 				if convo:
-					convo.queue.put(data)
+					await convo.queue.put(message)
+					self.logger.debug(f'Posted {message!r}')
 
 				elif guid is not None:
 					self.logger.warning(f'Got response for non-existent conversation {guid}')
@@ -68,8 +78,10 @@ class Client:
 				else:
 					self.logger.warning(f'No response ID provided in body: {data!r}')
 
+			except ReceiveException as e:
+				self.logger.warning(f'Received error: {e!r}')
 			except Exception as e:
-				self.logger.error(f'Error handling response: {e!r}')
+				self.logger.error(f'{traceback.format_exc()}\nError handling response: {e!r}')
 
 	def convo(self):
 		if self.ctx is None:
@@ -83,6 +95,7 @@ class Client:
 
 
 class Convo:
+	last_convo_id = 0
 	def __init__(self, client: Client):
 		self.client = client
 		self.ctx = client.ctx
@@ -90,24 +103,34 @@ class Convo:
 
 		self.queue = asyncio.Queue()
 
-	async def send_and_wait(self, data: dict, timeout=3):
-		copy = data.copy()
+		Convo.last_convo_id += 1
+		self.id = Convo.last_convo_id
+		self.logger = self.client.logger.getChild(f'convo:{self.id}')
 
-		copy.update(response_id=str(self.guid))
+	async def send_and_wait(self, data: Union[dict, Message], timeout=3) -> Message:
+		if isinstance(data, dict):
+			message = Message(data=data)
+		elif isinstance(data, Message):
+			message = data
+		else:
+			raise TypeError('data must be dict or Message')
 
-		await self.ctx.send(json.dumps(copy))
+		await self.ctx.send(message.json(response_id=str(self.guid)))
+
+		self.logger.debug(f'Sending data {message} and waiting {timeout} seconds for response')
 
 		data_fut = asyncio.get_event_loop().create_future()  # type: asyncio.Future
 		timeout_fut = None
 
 		async def timeout_callback():
 			await asyncio.sleep(timeout)
+			self.logger.warning('Timed out waiting for response')
 			data_fut.set_exception(Exception(f'send_and_wait timeout out after {timeout}'))
 
 		async def await_data():
 			new_data = await self.queue.get()
 			timeout_fut.cancel()
-			return new_data
+			data_fut.set_result(new_data)
 
 		timeout_fut = asyncio.ensure_future(timeout_callback())
 		asyncio.ensure_future(await_data())
@@ -120,15 +143,20 @@ class Convo:
 		return data
 
 
+class ReceiveException(Exception):
+	pass
+
+
 class ResponseException(Exception):
-	def __init__(self, message, *, error_type, **data):
+	def __init__(self, message, *, error_types=None, **data):
 		super(ResponseException, self).__init__(message)
-		self.error_type = error_type
+		self.message = message
+		self.error_types = error_types or []
 		self.data = data
 
 	def __repr__(self):
 		data = ','.join(f'{key}={value!r}' for key, value in self.data.items())
-		return f'ResponseException({self.error_type!r},{self.args},{data})'
+		return f'ResponseException({self.error_types!r},{self.args},{data})'
 
 	def __str__(self):
-		return self.error_type
+		return f'ResponseException: {self.message!r} {self.error_types}'
