@@ -22,13 +22,13 @@ class Message(object):
 			error: str = None,
 			error_data: Dict = None
 		):
-		self.data = deepcopy(data) or {}
+		self.data = deepcopy(data) if data is not None else {}
 		self.success = success
 		self.error = error
 		self.error_data = error_data
 
 	def load(self, json_data):
-		self.data = json_data.copy()
+		self.data = deepcopy(json_data)
 
 		self.success = json_data.get('success')
 		self.error = json_data.get('error')

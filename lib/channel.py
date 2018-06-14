@@ -66,8 +66,11 @@ class Conversation(AbstractAwaitDispatch):
 	def get_await_dispatch(self):
 		return self.await_dispatch
 
-	def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+	def send(self, data: Dict):
 		self.client.send(Message(data=data), self.await_dispatch.guid)
+
+	def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+		self.send(data)
 		return self(params=params, timeout=timeout)
 
 
@@ -186,25 +189,11 @@ class Channel(Router):
 		if not action:
 			raise RouterResponseError(f'Invalid action {action_name!r}')
 
-		data = message.data.get('data') or {}
-
-		# Since we already provide a default argument 'connection', remove it
-		params = action.params.copy()
-		del params['client']
-
-		if data is None:
-			if params:
-				raise RouterResponseError('No data body provided')
-
-		elif not isinstance(data, dict):
-			raise RouterResponseError('Data body must be an object')
-
 		response_id = message.data.get('response_id')
 
 		# Dispatch our action
-
 		try:
-			self.dispatcher.dispatch(source=client, action_name=action_name, args=data, response_id=response_id)
+			self.dispatcher.dispatch(source=client, action_name=action_name, args=message.data, response_id=response_id)
 
 		except RouterError as e:
 			self.logger.warning(f'Caught error while performing action: {e!r}')
@@ -233,10 +222,16 @@ class Channel(Router):
 	def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
+		orig_exc_class = e.__class__.__name__
+
 		assert isinstance(source, ChannelClient)
 
 		if not isinstance(e, RouterError):
 			e = ChannelResponseError(f'Unexpected exception: {e}', response=response_id)
+
+		# TODO: this is the only place where we set the exception class, though we raise errors without this
+		# TODO: elsewhere, we should test for those.
+		e.error_data.update(exc_class=orig_exc_class)
 
 		# Try to set response ID even if error isn't ChannelResponseError
 		if response_id:

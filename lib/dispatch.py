@@ -256,7 +256,7 @@ class ResponseDispatcher(object):
 		if invalid_args:
 			raise DispatchArgumentError(f'Specified intrinsic parameters: {invalid_args}')
 
-		exposed_param_names = set(action.params.keys()) - set(action.intrinsic_params)
+		exposed_param_names = set(action.get_exposed_params().keys())
 
 		missing_params = list(exposed_param_names - set(args.keys()))
 
@@ -305,7 +305,7 @@ class ResponseDispatcher(object):
 			# or cancel requests. Next dispatch must occur next event since this await_dispatch itself is an event. Cancel
 			async def async_timeout():
 				await asyncio.sleep(timeout, loop=self.loop_thread.event_loop)
-				future.set_exception(DispatchAsyncTimeout())
+				future.set_exception(DispatchAwaitTimeout())
 				self.logger.warning(f'Awaiting response {await_dispatch} timed out in {timeout}')
 
 			# TODO: Maybe we can possibly be sure that we can be safe if the dispatch class stops before
@@ -411,7 +411,7 @@ class ResponseDispatcher(object):
 					source=source,
 					dispatcher=self,
 					action_name=action_name,
-					default_params=action.params,
+					default_params=action.get_exposed_params(),
 					guid=response_guid,
 				)
 
@@ -504,9 +504,10 @@ class ResponseDispatcher(object):
 
 			self.logger.debug(f'Dispatching continuation of {existing_ad}')
 
+			# TODO: A continuation dispatch will default to
 			self._verify_full_arguments(
 				action_name=action_name,
-				params=existing_ad.get_current_params(),
+				params=existing_ad.get_await_dispatch().get_current_params(),
 				args=args,
 			)
 
@@ -640,6 +641,9 @@ class Action(object):
 		self.timeout = timeout
 		self.func_params = func_params
 
+	def get_exposed_params(self) -> Dict[str, Type]:
+		return {param: self.params[param] for param in (set(self.params.keys()) - set(self.intrinsic_params))}
+
 	def clone(self) -> 'Action':
 		copy = Action()
 		copy.__dict__ = deepcopy(self.__dict__)
@@ -736,7 +740,7 @@ class DispatchError(Exception):
 	pass
 
 
-class DispatchAsyncTimeout(Exception):
+class DispatchAwaitTimeout(DispatchError):
 	pass
 
 
