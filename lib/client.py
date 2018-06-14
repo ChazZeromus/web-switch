@@ -26,6 +26,7 @@ class Client:
 	async def __aexit__(self, *args, **kwargs) -> None:
 		for convo in self.active_convos.values():
 			await convo.queue.put(Exception('Client terminating!'))
+			convo.cancel_expects()
 
 		await self.connection.__aexit__(*args, **kwargs)
 		await self._loop_fut
