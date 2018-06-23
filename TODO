@@ -155,6 +155,25 @@ issues. (Like providing an auth token as a common param that is internal to the 
 
 When we dispatch the async methods we should really store those futures so ResponseDispatcher.stop() can cancel them
 or set_exception them
+    Done, stored in self._active_dispatches
 
 Also we got tons of asyncio exception that happen even when tests succeed
 
+There seems ot be two event loops that are calling each other during test_convo test. test_convo's Router has its own
+event thread that is used by its own EventLoopThread object for reading from websockets, and ResponseDispatcher
+has its own EventLoopThread and uses its own thread when dispatch async actions, which is very problematic since
+the definition of these actions will be using methods like send() that are async but use Router's event loop and not
+one loop:/
+    Seems like you could do is not explicitly specify the event loops when calling these functions. By omitting the event
+    loop, the current event is used, which is whatever is running the current coroutine. This way the Router class can have
+    async methods that can be run from event loops external to the Router's private event loop.
+        Done
+
+In our tests, if the client's last action is to send a server-consumed message, then the client will destruct
+and will likely cause a possible early destruction of the server in client_test.py without processing all messages as
+the fixture client_with_server dictates that the yielded client destructs and so should the parent nested fixture immediately
+after. This causes issues as the server may not be finished and is ended prematurely. Since packets can arrive in an arbitrary
+amount of time, we could some how await the server destruction until it processed the last message? The only way to reliably
+await server destruction is if we keep track of client messages sent to server make sure all of them are processed in
+the server before destruction. But this seems a bit hacky as the server knows exactly what messages to receive.
+    Done, Added a simple 5 second timeout for now that cancels AwaitDispatches and Actions on timeout

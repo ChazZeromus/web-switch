@@ -1,13 +1,21 @@
-from typing import Callable, Dict, List, Type, Tuple, Optional, Union, NamedTuple, Iterable, Any
+from typing import Callable, Dict, List, Type, Tuple, Optional, Union, NamedTuple, Iterable, Any, Set, Coroutine
 from threading import Lock
 import asyncio
 import uuid
 import inspect
 import re
 import logging
+import itertools
 from copy import deepcopy
+from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
 from lib.event_loop import EventLoopThread
+
+
+# TODO: In the case where an instance of the user sends a dispatch way too early and already receives a response
+# TODO: but ends up missing it because it asks for it too late, maybe make a message queue for AwaitDispatches?
+# TODO: And also make that queue be able to expire? But then we'd have to keep track of completed action GUIDs
+# TODO: so we know a client is sending data to an expired conversation.
 
 
 class ParameterSet(NamedTuple):
@@ -80,7 +88,7 @@ class ResponseDispatcher(object):
 		self,
 		instance: object,
 		common_params: ParameterSet,
-		exception_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], None],
+		exception_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], Coroutine],
 		complete_handler: Callable[[object, str, Any, Optional[uuid.UUID]], None] = None,
 		argument_hook: Callable[[Dict, object, 'Action'], Dict] = None,
 		common_async_params: ParameterSet = ParameterSet(),
@@ -109,11 +117,13 @@ class ResponseDispatcher(object):
 
 		self.loop_thread = None  # type: EventLoopThread
 
-		self._await_dispatches = {}  # type: Dict[Tuple[str, uuid.UUID], 'AbstractAwaitDispatch']
-		self._active_sources = {}  # type: Dict[Tuple[str, object], 'AbstractAwaitDispatch']
+		self._active_ads = {}  # type: Dict[Tuple[str, uuid.UUID], 'AbstractAwaitDispatch']
+		self._active_ads_per_source = {}  # type: Dict[Tuple[str, object], 'AbstractAwaitDispatch']
+		self._active_dispatches = set()  # type: Set[asyncio.Future]
 		self._lock = Lock()
 
 		self._stopping = False
+		self._stopped = False
 
 		self._exc_handler = exception_handler
 		self._complete_handler = complete_handler
@@ -143,18 +153,64 @@ class ResponseDispatcher(object):
 		self.loop_thread.start()
 		self.loop_thread.wait_result()
 
-	def stop(self):
+	def stop(self, timeout: float = None):
+		if self._stopping:
+			self.logger.warning('Stop dispatch already requested')
+			return
+
+		self.logger.debug('Stop dispatch requested')
 		self._stopping = True
 
-		pending = self._await_dispatches.values()
+		# Cancel any awaiting dispatches
+		pending_awaits = []
 
-		if pending:
-			self.logger.info(f'Cancelling {len(pending)} pending coroutine actions')
+		for provider in self._active_ads.values():
+			future = provider.get_await_dispatch().get_current_future()
+			if future:
+				pending_awaits.append(future)
 
-			for providers in pending:
-				future = providers.get_await_dispatch().get_current_future()
-				if future:
-					future.cancel()
+			self.logger.info(
+				f'Stop requested with {len(pending_awaits)} awaits and {len(self._active_dispatches)} actions'
+				f' still active.'
+			)
+
+		if pending_awaits and timeout > 0 or timeout is None:
+			self.logger.info(f'Waiting {timeout} seconds for AwaitDispatches and actions to finish')
+
+			async def gather():
+				await asyncio.gather(
+					*itertools.chain(pending_awaits, self._active_dispatches),
+					loop=self.loop_thread.event_loop,
+					return_exceptions=True,
+				)
+
+			result = self.loop_thread.run_coroutine_threadsafe(gather())
+
+			try:
+				result.result(timeout)
+			except ConcurrentTimeoutError:
+				self.logger.debug('Took too long to finish, cancelling remaining AwaitDispatches')
+
+			if result.done():
+				self.logger.debug('All AwaitDispatches finished')
+				pending_awaits.clear()
+
+				if self._active_dispatches:
+					self.logger.warning(f'Waited for all actions but {len(self._active_dispatches)} remain')
+				else:
+					self.logger.info('All active dispatch actions finished')
+
+		self._stopped = True
+
+		if pending_awaits:
+			self.logger.info(f'Cancelling {len(pending_awaits)} pending AwaitDispatches')
+			for future in pending_awaits:
+				future.cancel()
+
+		if self._active_dispatches:
+			self.logger.info(f'Cancelling {len(self._active_dispatches)} actions')
+			for future in self._active_dispatches:
+				future.cancel()
 
 		self.logger.debug('Shutting down loop thread, and joining thread')
 		self.loop_thread.shutdown_loop()
@@ -206,32 +262,32 @@ class ResponseDispatcher(object):
 
 	def _set_await_dispatch(self, source: object, key: Tuple[str, uuid.UUID], provider: 'AbstractAwaitDispatch'):
 		with self._lock:
-			self._await_dispatches[key] = provider
+			self._active_ads[key] = provider
 
 			action, uuid_ = key
 
 			action_key = (action, source)
 
-			self._active_sources[action_key] = provider
+			self._active_ads_per_source[action_key] = provider
 
 	# This is public because AwaitDispatch uses it
 	def delete_await_dispatch(self, key: Tuple[str, uuid.UUID]):
 		with self._lock:
-			provider = self._await_dispatches[key]
+			provider = self._active_ads[key]
 
-			del self._await_dispatches[key]
+			del self._active_ads[key]
 
 			action, uuid_ = key
 
 			action_key = (action, provider.get_await_dispatch().source)
 
-			del self._active_sources[action_key]
+			del self._active_ads_per_source[action_key]
 
 			del provider
 
 	def _get_await_dispatch(self, key: Tuple[str, uuid.UUID]):
 		with self._lock:
-			return self._await_dispatches.get(key)
+			return self._active_ads.get(key)
 
 	@classmethod
 	def _validate_param_set(cls, param_set: ParameterSet):
@@ -336,7 +392,7 @@ class ResponseDispatcher(object):
 
 			source_key = (action.name, source)
 
-			provider = self._active_sources.get(source_key)
+			provider = self._active_ads_per_source.get(source_key)
 
 			if provider is not None:
 				pending_await = provider.get_await_dispatch()
@@ -368,14 +424,16 @@ class ResponseDispatcher(object):
 		:param response_id: Guid of response session to reply to, if any
 		:return:
 		"""
+		# Allow if we're _stopping in case stop() is waiting
+		if self._stopped:
+			raise DispatchStopping()
+
 		action = self.actions.get(action_name)
 
 		if action is None:
 			raise DispatchNotFound()
 
 		self.logger.debug(f'Dispatching for {action}')
-
-		# TODO: Allow client to provide its own message ID.
 
 		# If no response ID is provided then generate one.
 		if response_id is None:
@@ -441,6 +499,8 @@ class ResponseDispatcher(object):
 
 			# Co-routine to run regardless of synchronocity
 			async def dispatch_async():
+				dispatch_future = None
+
 				try:
 					# If a hook is defined, run it and get new arguments
 					if self._arg_hook:
@@ -455,16 +515,28 @@ class ResponseDispatcher(object):
 					if not action.has_kwargs:
 						passed_args = {k: passed_args[k] for k in passed_args.keys() & action.params.keys()}
 
-					return await async_dispatch_callback(passed_args)
+					dispatch_future = asyncio.ensure_future(async_dispatch_callback(passed_args), loop=self.loop_thread.event_loop)
+					self._active_dispatches.add(dispatch_future)
 
-				except Exception as e:
+					return await dispatch_future
+
+				except Exception as exc:
 					# Call exception handler if something happened
-					def exc_callback(exc):
-						self._exc_handler(source, action_name, exc, response_guid)
+					try:
+						if asyncio.iscoroutinefunction(self._exc_handler):
+							await self._exc_handler(source, action_name, exc, response_guid)
+						else:
+							self._exc_handler(source, action_name, exc, response_guid)
 
-					self.loop_thread.call_soon_threadsafe(exc_callback, e)
+					except Exception as exc_exc:
+						self.logger.error(f'Unexpected error while running exception handler: {exc_exc}')
+
 					# Raise so future does not invoke complete handler
 					raise
+
+				finally:
+					if dispatch_future:
+						self._active_dispatches.remove(dispatch_future)
 
 			def done_callback(done_future: asyncio.Future):
 				# Call cleanup handler if any
@@ -472,7 +544,7 @@ class ResponseDispatcher(object):
 					cleanup_callback()
 
 				# Call done handler if done
-				if self._complete_handler and done_future.done():
+				if self._complete_handler and done_future.done() and not done_future.cancelled():
 					# Make sure handler is called in our event loop
 					# TODO: Do we need to do this event loop deferring elsewhere?
 					self.loop_thread.call_soon_threadsafe(

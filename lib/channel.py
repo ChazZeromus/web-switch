@@ -50,12 +50,19 @@ class ChannelClient(object):
 		self.acl = ClientACL(**kwargs)
 		self.name = None  # type: str
 
-	def send(self, message: Message, response_id: Optional[uuid.UUID]):
+	async def send(self, message: Message, response_id: Optional[uuid.UUID]):
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
-		self.channel.send_messages([self.conn], message)
+		await self.channel.send_messages([self.conn], message)
+
+	def try_send(self, message: Message, response_id: Optional[uuid.UUID]):
+		if response_id is not None:
+			message = message.clone()
+			message.data.update(response_id=str(response_id))
+
+		self.channel.try_send_messages([self.conn], message)
 
 
 class Conversation(AbstractAwaitDispatch):
@@ -66,12 +73,12 @@ class Conversation(AbstractAwaitDispatch):
 	def get_await_dispatch(self):
 		return self.await_dispatch
 
-	def send(self, data: Dict):
-		self.client.send(Message(data=data), self.await_dispatch.guid)
+	async def send(self, data: Dict):
+		await self.client.send(Message(data=data), self.await_dispatch.guid)
 
-	def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
-		self.send(data)
-		return self(params=params, timeout=timeout)
+	async def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+		await self.send(data)
+		return await self(params=params, timeout=timeout)
 
 
 class Channel(Router):
@@ -107,7 +114,7 @@ class Channel(Router):
 			argument_hook=self.argument_hook,
 		)
 
-		self.logger = logging.getLogger(f'ChannelRouter:{self.id}')
+		self.logger = self.get_logger().getChild(f'ChannelRouter:{self.id}')
 		self.logger.setLevel(logging.DEBUG)
 		self.logger.info('Creating channel server')
 
@@ -136,7 +143,7 @@ class Channel(Router):
 		self.dispatcher.start()
 
 	def on_stop(self):
-		self.dispatcher.stop()
+		self.dispatcher.stop(self.stop_timeout)
 
 	def on_new(self, connection: Connection, path: str) -> None:
 		groups = {'channel': None, 'room': None}
@@ -192,6 +199,7 @@ class Channel(Router):
 		response_id = message.data.get('response_id')
 
 		# Dispatch our action
+		# TODO: Maybe make dispatch() async so we can utilize return values and deprecate completion handler
 		try:
 			self.dispatcher.dispatch(source=client, action_name=action_name, args=message.data, response_id=response_id)
 
@@ -199,7 +207,7 @@ class Channel(Router):
 			self.logger.warning(f'Caught error while performing action: {e!r}')
 			# TODO: Make setting response_id not redundant
 			ChannelResponseError.set_guid(e, response_id)
-			client.send(Message.error_from_exc(e), response_id=response_id)
+			client.try_send(Message.error_from_exc(e), response_id=response_id)
 
 		except Exception as e:
 			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
@@ -218,8 +226,8 @@ class Channel(Router):
 
 		return client
 
-	# Define our exception handler for actions
-	def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
+	# Define our exception handler for actions so we can send back a
+	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
 		orig_exc_class = e.__class__.__name__
@@ -237,14 +245,14 @@ class Channel(Router):
 		if response_id:
 			ChannelResponseError.set_guid(e, response_id)
 
-		source.send(Message.error_from_exc(e), response_id)
+		source.try_send(Message.error_from_exc(e), response_id)
 
 	# Define our completer when actions complete and return
 	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID = None):
 		assert isinstance(source, ChannelClient)
 
 		if isinstance(result, Dict):
-			source.send(Message(data=result), response_id)
+			source.try_send(Message(data=result), response_id)
 		else:
 			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
 

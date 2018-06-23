@@ -3,11 +3,12 @@ import json
 import logging
 import uuid
 import traceback
-from typing import Dict, Optional, Union, Set, Tuple
+from typing import Dict, Optional, Union, Set, Tuple, NamedTuple
 
 import websockets
 
 from lib.message import Message
+
 
 class Client:
 	def __init__(self, ws_url):
@@ -21,6 +22,7 @@ class Client:
 	async def __aenter__(self, *args, **kwargs) -> 'Client':
 		self.ctx = await self.connection.__aenter__(*args, **kwargs)
 		self._loop_fut = asyncio.ensure_future(self._recv_loop())
+		self.logger.debug('Entering')
 		return self
 
 	async def __aexit__(self, *args, **kwargs) -> None:
@@ -30,6 +32,8 @@ class Client:
 
 		await self.connection.__aexit__(*args, **kwargs)
 		await self._loop_fut
+
+		self.logger.debug('Exiting')
 
 	@staticmethod
 	def _extract_guid(message: Message) -> Optional[uuid.UUID]:
@@ -95,6 +99,12 @@ class Client:
 		return new_convo
 
 
+class _ActiveItem(NamedTuple):
+	data_future: asyncio.Future = None
+	timeout_future: asyncio.Future = None
+	retrieve_future: asyncio.Future = None
+
+
 class Convo:
 	last_convo_id = 0
 
@@ -111,16 +121,15 @@ class Convo:
 		self.id = Convo.last_convo_id
 		self.logger = self.client.logger.getChild(f'convo:{self.action}:{self.id}')
 
-		self._active_expects = set()  # type: Set[Tuple[asyncio.Future, asyncio.Future]]
+		self._active_expects = set()  # type: Set[_ActiveItem]
 
 	def cancel_expects(self):
-		for item in list(self._active_expects):
-			timeout_fut, data_fut = item
+		for active_item in list(self._active_expects):
+			active_item.timeout_future.cancel() # TODO: threadsafe?
+			active_item.retrieve_future.cancel()
+			active_item.data_future.set_exception(ClientShutdownException())
 
-			timeout_fut.cancel() # TODO: threadsafe?
-			data_fut.set_exception(ClientShutdownException())
-
-			self._active_expects.remove(item)
+			self._active_expects.remove(active_item)
 
 	async def send(self, data: Union[dict, Message]):
 		if isinstance(data, dict):
@@ -137,30 +146,30 @@ class Convo:
 	async def expect(self, timeout: float):
 		self.logger.debug(f'Waiting {timeout} seconds for response')
 
-		data_fut = asyncio.get_event_loop().create_future()  # type: asyncio.Future
-		timeout_fut = None
-		active_item = None
+		active_item = None  # type: _ActiveItem
 
 		async def timeout_callback():
 			await asyncio.sleep(timeout)
 			self.logger.warning('Timed out waiting for response')
-			data_fut.set_exception(ResponseTimeoutException(f'send_and_expect timeout out after {timeout}'))
+			active_item.retrieve_future.cancel()
+			active_item.data_future.set_exception(ResponseTimeoutException(f'send_and_expect timeout out after {timeout}'))
 			self._active_expects.remove(active_item)
 
 		async def await_data():
 			new_data = await self.queue.get()
-			timeout_fut.cancel()
-			data_fut.set_result(new_data)
+			active_item.timeout_future.cancel()
 			self._active_expects.remove(active_item)
+			active_item.data_future.set_result(new_data)
 
-		timeout_fut = asyncio.ensure_future(timeout_callback())
+		active_item = _ActiveItem(
+			data_future=asyncio.get_event_loop().create_future(),
+			timeout_future=asyncio.ensure_future(timeout_callback()),
+			retrieve_future=asyncio.ensure_future(await_data()),
+		)
 
-		active_item = (timeout_fut, data_fut)
 		self._active_expects.add(active_item)
 
-		asyncio.ensure_future(await_data())
-
-		response_data = await data_fut
+		response_data = await active_item.data_future
 
 		if isinstance(response_data, BaseException):
 			raise response_data

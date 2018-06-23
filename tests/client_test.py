@@ -1,6 +1,6 @@
 import pytest
 import socket
-from asyncio import sleep
+from asyncio import sleep as async_sleep
 from contextlib import closing
 
 from lib.channel import Channel, ChannelClient, add_action, Conversation
@@ -29,7 +29,7 @@ class ChannelFixture(Channel):
 		assert arg, 'arg was not in response'
 		assert arg == 'ok', 'response was not "ok"'
 
-		response = await convo.send_and_recv({'data': 'What is 2+2?'})
+		response = await convo.send_and_recv({'data': 'What is 2+2?'}, params={'arg': int})
 
 		arg = response.get('arg')
 
@@ -41,8 +41,8 @@ class ChannelFixture(Channel):
 
 	@add_action(params={'timeout': float})
 	async def action_client_timeout_test(self, timeout: float, client: 'ChannelClient', convo: Conversation):
-		await sleep(timeout)
-		convo.send({'data': 'all done!'})
+		await async_sleep(timeout)
+		await convo.send({'data': 'all done!'})
 
 	@add_action()
 	async def action_server_timeout_test(self, client: 'ChannelClient', convo: Conversation):
