@@ -6,7 +6,7 @@ from typing import Callable, Optional
 from queue import Queue as thread_Queue
 from multiprocessing import Queue as mp_Queue
 import concurrent.futures as futures
-
+from lib.logger import g_logger
 
 class EventLoopThread(threading.Thread):
 	event_loop_thread_latest_id = 0
@@ -25,8 +25,7 @@ class EventLoopThread(threading.Thread):
 		EventLoopThread.event_loop_thread_latest_id += 1
 		self.id = EventLoopThread.event_loop_thread_latest_id
 
-		self.logger = logging.getLogger(f'EventLoopThread:{self.id}')
-		self.logger.setLevel(logging.DEBUG)
+		self.logger = g_logger.getChild(f'EventLoopThread:{self.id}')
 		self.logger.debug('Creating EventLoopThread')
 
 		super(EventLoopThread, self).__init__(

@@ -57,6 +57,9 @@ class Message(object):
 				except TypeError:
 					error_data[key] = repr(value)
 
+			if not error_data.get('exc_class'):
+				error_data['exc_class'] = exception.__class__.__name__
+
 			return cls.error(
 				message=exception.message,
 				error_types=exception.error_types,

@@ -1,5 +1,6 @@
 from typing import List, Union
 
+
 class RouterError(Exception):
 	def __init__(self, error_types: Union[List[str], str], message: str, **data):
 		super(RouterError, self).__init__()

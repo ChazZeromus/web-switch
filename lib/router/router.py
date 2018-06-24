@@ -17,6 +17,7 @@ from lib.event_loop import EventLoopThread
 from lib.message import Message
 from lib.router.connection import Connection, ConnectionList
 from lib.router.errors import RouterError, RouterConnectionError, RouterServerError
+from lib.logger import g_logger
 
 
 def _route_thread(
@@ -73,16 +74,13 @@ class Router(object):
 
 		self.last_connection_id = 0
 
-		self.__logger = logging.getLogger(f'Router:{self.id}')
-		self.__logger.setLevel(logging.DEBUG)
+		self.__logger = g_logger.getChild(f'Router:{self.id}')
 		self.__logger.debug('Creating Router server')
 
 		self._server_thread = threading.Thread(target=self._serve_forever)
 		self._interrupt_event = threading.Event()
 
 		self._close_lock = threading.Lock()
-
-		self.stop_timeout = None  # type: float
 
 	def get_logger(self):
 		return self.__logger
@@ -99,8 +97,7 @@ class Router(object):
 
 			self.stop_serve()
 
-	def stop_serve(self, timeout: float = 5):
-		self.stop_timeout = timeout
+	def stop_serve(self):
 		self._interrupt_event.set()
 		self._server_thread.join()
 
@@ -172,7 +169,7 @@ class Router(object):
 
 		# Instead wait up to 10 seconds for connections pool to empty, if not just continue
 		wait_time = 10
-		sleep_time = 1.0 / wait_time
+		sleep_time = 0.001
 		sleep_count = int(wait_time / sleep_time)
 
 		self.__logger.info(f'Waiting up to {wait_time} seconds for remaining connections to close')
@@ -282,11 +279,11 @@ class Router(object):
 			self.on_message(connection, message)
 
 		except RouterError as e:
-			self.__logger.warning(f'Generated response error: {e!r}')
+			self.__logger.warning(f'Caught router error during handling: {e!r}')
 			self.try_send_messages([connection], Message.error_from_exc(e))
 
 		except Exception as e:
-			self.__logger.error(f'{traceback.format_exc()}\nUnhandled response exception {e}')
+			self.__logger.error(f'{traceback.format_exc()}\nUnhandled exception while handling: {e}')
 			self.try_send_messages([connection], Message.error_from_exc(e))
 			raise
 

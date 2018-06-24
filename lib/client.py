@@ -1,13 +1,13 @@
 import asyncio
 import json
-import logging
 import uuid
 import traceback
-from typing import Dict, Optional, Union, Set, Tuple, NamedTuple
+from typing import Dict, Optional, Union, Set, NamedTuple
 
 import websockets
 
 from lib.message import Message
+from lib.logger import g_logger
 
 
 class Client:
@@ -16,7 +16,7 @@ class Client:
 		self.ctx = None
 		self.response_id = None
 		self.active_convos = {}  # type: Dict[uuid.UUID, Convo]
-		self.logger = logging.getLogger('Client')
+		self.logger = g_logger.getChild('Client')
 		self._loop_fut = None
 
 	async def __aenter__(self, *args, **kwargs) -> 'Client':
@@ -40,10 +40,7 @@ class Client:
 		response_id = message.data.get('response_id')
 
 		if not response_id and message.error_data:
-			error_data = message.error_data.get('error_data')
-
-			if error_data:
-				response_id = error_data.get('response_id')
+			response_id = message.error_data.get('response_id')
 
 		if not response_id:
 			return None
@@ -88,6 +85,7 @@ class Client:
 			except Exception as e:
 				self.logger.error(f'{traceback.format_exc()}\nError handling response: {e!r}')
 
+	# TODO: Create a status method that returns a Convo as an async context-manager as a shorthand
 	def convo(self, action: str):
 		if self.ctx is None:
 			raise Exception('No context is available to creating convo')
@@ -143,8 +141,11 @@ class Convo:
 
 		await self.ctx.send(message.json(action=self.action, response_id=str(self.guid)))
 
-	async def expect(self, timeout: float):
-		self.logger.debug(f'Waiting {timeout} seconds for response')
+	async def expect_forever(self) -> Message:
+		return await self.expect(None)
+
+	async def expect(self, timeout: Optional[float]) -> Message:
+		self.logger.debug(f'Waiting {timeout if timeout else "indefinitely"} seconds for response')
 
 		active_item = None  # type: _ActiveItem
 
@@ -157,13 +158,16 @@ class Convo:
 
 		async def await_data():
 			new_data = await self.queue.get()
-			active_item.timeout_future.cancel()
+
+			if active_item.timeout_future:
+				active_item.timeout_future.cancel()
+
 			self._active_expects.remove(active_item)
 			active_item.data_future.set_result(new_data)
 
 		active_item = _ActiveItem(
 			data_future=asyncio.get_event_loop().create_future(),
-			timeout_future=asyncio.ensure_future(timeout_callback()),
+			timeout_future=asyncio.ensure_future(timeout_callback()) if timeout else None,
 			retrieve_future=asyncio.ensure_future(await_data()),
 		)
 
@@ -176,7 +180,7 @@ class Convo:
 
 		return response_data
 
-	async def send_and_expect(self, data: Union[dict, Message], timeout: float=3.0) -> Message:
+	async def send_and_expect(self, data: Union[dict, Message], timeout: float=10.0) -> Message:
 		await self.send(data)
 		return await self.expect(timeout)
 
@@ -205,4 +209,4 @@ class ResponseException(Exception):
 		return f'ResponseException({self.error_types!r},{self.args},{data})'
 
 	def __str__(self):
-		return f'ResponseException: {self.message!r} {self.error_types}'
+		return f'ResponseException: {self.message} {self.error_types}'

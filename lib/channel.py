@@ -21,8 +21,13 @@ class ChannelError(RouterError):
 
 
 class ChannelResponseError(RouterResponseError):
-	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], **data):
-		super(ChannelResponseError, self).__init__(message=message, **data)
+	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], orig_exc: Exception = None, **data):
+		new_data = dict(data)
+
+		if orig_exc:
+			new_data['exc_class'] = orig_exc.__class__.__name__
+
+		super(ChannelResponseError, self).__init__(message=message, **new_data)
 		self.error_types.append('channel_response')
 		self.set_guid(self, response)
 
@@ -114,8 +119,9 @@ class Channel(Router):
 			argument_hook=self.argument_hook,
 		)
 
+		self.stop_timeout = None
+
 		self.logger = self.get_logger().getChild(f'ChannelRouter:{self.id}')
-		self.logger.setLevel(logging.DEBUG)
 		self.logger.info('Creating channel server')
 
 	def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
@@ -144,6 +150,10 @@ class Channel(Router):
 
 	def on_stop(self):
 		self.dispatcher.stop(self.stop_timeout)
+
+	def stop_serve(self, timeout: float = None):
+		self.stop_timeout = timeout
+		super(Channel, self).stop_serve()
 
 	def on_new(self, connection: Connection, path: str) -> None:
 		groups = {'channel': None, 'room': None}
@@ -186,31 +196,31 @@ class Channel(Router):
 		action_name = message.data.get('action')
 		client = self._get_client(connection)
 
-		if action_name is None:
-			raise RouterResponseError(
-				'No action provided' if not action_name else f'Unknown action {action_name!r}'
-			)
-
-		action = self.dispatcher.actions.get(action_name)
-
-		if not action:
-			raise RouterResponseError(f'Invalid action {action_name!r}')
-
 		response_id = message.data.get('response_id')
 
-		# Dispatch our action
-		# TODO: Maybe make dispatch() async so we can utilize return values and deprecate completion handler
 		try:
+			if action_name is None:
+				raise RouterResponseError(
+					'No action provided' if not action_name else f'Unknown action {action_name!r}'
+				)
+
+			action = self.dispatcher.actions.get(action_name)
+
+			if not action:
+				raise RouterResponseError(f'Invalid action {action_name!r}')
+
+			# Dispatch our action
+			# TODO: Maybe make dispatch() async so we can utilize return values and deprecate completion handler
 			self.dispatcher.dispatch(source=client, action_name=action_name, args=message.data, response_id=response_id)
 
 		except RouterError as e:
 			self.logger.warning(f'Caught error while performing action: {e!r}')
-			# TODO: Make setting response_id not redundant
-			ChannelResponseError.set_guid(e, response_id)
-			client.try_send(Message.error_from_exc(e), response_id=response_id)
+			if response_id:
+				ChannelResponseError.set_guid(e, response_id)
+			raise
 
 		except Exception as e:
-			self.logger.error(f'{traceback.format_exc()}\ndispatch error: {e!r}')
+			self.logger.error(f'dispatch error: {e!r}\n{traceback.format_exc()}')
 			raise ChannelError(f'Unexpected error performing action: {e!r}')
 
 	def on_remove(self, connection: Connection):
@@ -230,16 +240,10 @@ class Channel(Router):
 	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
-		orig_exc_class = e.__class__.__name__
-
 		assert isinstance(source, ChannelClient)
 
 		if not isinstance(e, RouterError):
-			e = ChannelResponseError(f'Unexpected exception: {e}', response=response_id)
-
-		# TODO: this is the only place where we set the exception class, though we raise errors without this
-		# TODO: elsewhere, we should test for those.
-		e.error_data.update(exc_class=orig_exc_class)
+			e = ChannelResponseError(f'Unexpected non-RouterError exception: {e}', orig_exc=e, response=response_id)
 
 		# Try to set response ID even if error isn't ChannelResponseError
 		if response_id:

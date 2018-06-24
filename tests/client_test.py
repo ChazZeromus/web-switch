@@ -1,24 +1,12 @@
-import pytest
-import socket
 from asyncio import sleep as async_sleep
-from contextlib import closing
 
-from lib.channel import Channel, ChannelClient, add_action, Conversation
 from lib.router.errors import RouterError
-from lib.client import Client, ResponseException, ResponseTimeoutException
+from lib.client import ResponseException, ResponseTimeoutException
+
+from .common import *
 
 
-class ChannelFixture(Channel):
-	def __init__(self, port: int):
-		super(ChannelFixture, self).__init__('localhost', port)
-
-	def __enter__(self):
-		self.serve(daemon=True)
-		return self
-
-	def __exit__(self, exc_type, exc_val, exc_tb):
-		self.stop_serve()
-
+class ClientTestingServer(ChannelServerBase):
 	@add_action(params={'arg': str})
 	async def action_test_conversation(self, arg: str, client: 'ChannelClient', convo: Conversation):
 
@@ -44,26 +32,13 @@ class ChannelFixture(Channel):
 		await async_sleep(timeout)
 		await convo.send({'data': 'all done!'})
 
-	@add_action()
-	async def action_server_timeout_test(self, client: 'ChannelClient', convo: Conversation):
-		await convo.send_and_recv({'data': 'yo'}, timeout=0.1)
-
-def find_free_port():
-	with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-		s.bind(('', 0))
-		return s.getsockname()[1]
-
-
-@pytest.fixture(scope='session')
-def free_port():
-	return find_free_port()
-
 
 @pytest.fixture(scope='function')
-async def client_with_server(free_port):
-	with ChannelFixture(free_port):
-		async with Client(f'ws://localhost:{free_port}/foo/bar') as client:
-			yield client
+def get_server(free_port):
+	def func():
+		return ClientTestingServer(free_port)
+
+	return func
 
 
 @pytest.mark.asyncio
@@ -108,25 +83,7 @@ async def test_client_timeout(client_with_server: Client):
 	convo = client_with_server.convo('client_timeout_test')
 
 	with pytest.raises(ResponseTimeoutException) as excinfo:
-		await convo.send_and_expect({'timeout': 10.0}, timeout=0.1)
-
-
-@pytest.mark.asyncio
-async def test_server_timeout(client_with_server: Client):
-	convo = client_with_server.convo('server_timeout_test')
-
-	with pytest.raises(ResponseException) as excinfo:
-		# Send nothing and we should get yo back
-		response = await convo.send_and_expect({})
-
-		assert response.data.get('data') == 'yo'
-
-		# Server is now expecting a response back but it should timeout by itself
-		# so wait until it timeouts and raise exception inside expect()
-
-		await convo.expect(2.0)
-
-	assert excinfo.value.data.get('exc_class') == 'DispatchAwaitTimeout', 'Incorrect server exception class'
+		await convo.send_and_expect({'timeout': 0.2}, timeout=0.1)
 
 # TODO: Test active source cancelling
 # TODO: On both Client- and Channel-side, should register all timeouts so that upon server close

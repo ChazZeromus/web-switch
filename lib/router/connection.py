@@ -6,6 +6,8 @@ from typing import Optional, List
 import websockets
 from websockets import WebSocketServerProtocol
 
+from lib.logger import g_logger
+
 
 class ConnectionList:
 	def __init__(self):
@@ -64,8 +66,7 @@ class Connection(object):
 
 		self._close_lock = threading.Lock()
 
-		self.logger = logging.getLogger(f'Connection:{self.conn_id}')
-		self.logger.setLevel(logging.DEBUG)
+		self.logger = g_logger.getChild(f'Connection:{self.conn_id}')
 		self.logger.debug(f'Created connection {self!r}')
 
 	def copy_to_subclass(self, subclassed_object: 'Connection'):

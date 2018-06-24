@@ -10,6 +10,7 @@ from copy import deepcopy
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
 from lib.event_loop import EventLoopThread
+from lib.logger import g_logger
 
 
 # TODO: In the case where an instance of the user sends a dispatch way too early and already receives a response
@@ -132,8 +133,7 @@ class ResponseDispatcher(object):
 
 		self.actions = {}  # type: Dict[str, 'Action']
 
-		self.logger = logging.getLogger(f'ResponseDispatch:{self.id}')
-		self.logger.setLevel(logging.DEBUG)
+		self.logger = g_logger.getChild(f'ResponseDispatch:{self.id}')
 		self.logger.debug(f'Creating {self!r}')
 
 		self._build_actions()
@@ -155,10 +155,10 @@ class ResponseDispatcher(object):
 
 	def stop(self, timeout: float = None):
 		if self._stopping:
-			self.logger.warning('Stop dispatch already requested')
+			self.logger.warning('Stop dispatcher already requested')
 			return
 
-		self.logger.debug('Stop dispatch requested')
+		self.logger.debug(f'Stop dispatcher requested with timeout of {timeout}')
 		self._stopping = True
 
 		# Cancel any awaiting dispatches
@@ -174,31 +174,34 @@ class ResponseDispatcher(object):
 				f' still active.'
 			)
 
-		if pending_awaits and timeout > 0 or timeout is None:
-			self.logger.info(f'Waiting {timeout} seconds for AwaitDispatches and actions to finish')
+		if pending_awaits or self._active_dispatches:
+			if timeout is None or timeout > 0:
+				self.logger.info(f'Waiting {timeout} seconds for AwaitDispatches and actions to finish')
 
-			async def gather():
-				await asyncio.gather(
-					*itertools.chain(pending_awaits, self._active_dispatches),
-					loop=self.loop_thread.event_loop,
-					return_exceptions=True,
-				)
+				async def gather():
+					await asyncio.gather(
+						*itertools.chain(pending_awaits, self._active_dispatches),
+						loop=self.loop_thread.event_loop,
+						return_exceptions=True,
+					)
 
-			result = self.loop_thread.run_coroutine_threadsafe(gather())
+				result = self.loop_thread.run_coroutine_threadsafe(gather())
 
-			try:
-				result.result(timeout)
-			except ConcurrentTimeoutError:
-				self.logger.debug('Took too long to finish, cancelling remaining AwaitDispatches')
+				try:
+					result.result(timeout)
+				except ConcurrentTimeoutError:
+					self.logger.debug('Took too long to finish, cancelling remaining AwaitDispatches')
 
-			if result.done():
-				self.logger.debug('All AwaitDispatches finished')
-				pending_awaits.clear()
+				if result.done():
+					self.logger.debug('All AwaitDispatches finished')
+					pending_awaits.clear()
 
-				if self._active_dispatches:
-					self.logger.warning(f'Waited for all actions but {len(self._active_dispatches)} remain')
-				else:
-					self.logger.info('All active dispatch actions finished')
+					if self._active_dispatches:
+						self.logger.warning(f'Waited for all actions but {len(self._active_dispatches)} remain')
+					else:
+						self.logger.info('All active dispatch actions finished')
+		else:
+			self.logger.info('All AwaitDispatches and actions are already completed')
 
 		self._stopped = True
 
@@ -809,7 +812,8 @@ class AwaitDispatch(AbstractAwaitDispatch):
 
 
 class DispatchError(Exception):
-	pass
+	def __str__(self):
+		return super(DispatchError, self).__str__() if self.args else self.__class__.__name__
 
 
 class DispatchAwaitTimeout(DispatchError):
