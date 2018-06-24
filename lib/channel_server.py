@@ -49,7 +49,7 @@ class ClientACL:
 
 # TODO: Create a ChannelClient class that can have multiple Connections
 class ChannelClient(object):
-	def __init__(self, channel: 'Channel', conn: Optional[Connection], **kwargs):
+	def __init__(self, channel: 'ChannelServer', conn: Optional[Connection], **kwargs):
 		self.channel = channel
 		self.conn = conn
 		self.acl = ClientACL(**kwargs)
@@ -86,7 +86,7 @@ class Conversation(AbstractAwaitDispatch):
 		return await self(params=params, timeout=timeout)
 
 
-class Channel(Router):
+class ChannelServer(Router):
 	_common_intrinsic_params = {
 		'client': ChannelClient
 	}
@@ -102,7 +102,7 @@ class Channel(Router):
 	)
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100):
-		super(Channel, self).__init__(host, port, max_queue_size)
+		super(ChannelServer, self).__init__(host, port, max_queue_size)
 		self.channels = {}  # type: Dict[Tuple[str, str], Set[ChannelClient]]
 		self.conn_to_client = {}  # type: Dict[Connection, ChannelClient]
 
@@ -153,7 +153,7 @@ class Channel(Router):
 
 	def stop_serve(self, timeout: float = None):
 		self.stop_timeout = timeout
-		super(Channel, self).stop_serve()
+		super(ChannelServer, self).stop_serve()
 
 	def on_new(self, connection: Connection, path: str) -> None:
 		groups = {'channel': None, 'room': None}
@@ -295,7 +295,7 @@ def cli_main():
 
 	logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')
 
-	router = Channel(args.host, args.port)
+	router = ChannelServer(args.host, args.port)
 	router.serve(daemon=False)
 
 

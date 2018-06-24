@@ -6,12 +6,12 @@ from typing import Iterable, Tuple, List
 import pytest
 
 from lib.client import Client
-from lib.channel import Channel, ChannelClient, add_action, Conversation
+from lib.channel_server import ChannelServer, ChannelClient, add_action, Conversation
 
 HOSTNAME = '127.0.0.1'
 
 
-class ChannelServerBase(Channel):
+class ChannelServerBase(ChannelServer):
 	def __init__(self, port: int):
 		super(ChannelServerBase, self).__init__('localhost', port)
 
