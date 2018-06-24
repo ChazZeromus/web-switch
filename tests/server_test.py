@@ -3,6 +3,7 @@ import pytest
 from asyncio import sleep as async_sleep
 
 from .common import *
+from lib.channel_server import Conversation, add_action, ChannelClient
 from lib.client import ResponseException
 
 

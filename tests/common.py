@@ -6,10 +6,10 @@ from typing import Iterable, Tuple, List
 import pytest
 
 from lib.client import Client
-from lib.channel_server import ChannelServer, ChannelClient, add_action, Conversation
+from lib.channel_server import ChannelServer
 
 HOSTNAME = '127.0.0.1'
-
+PORT = None # None for auto-select
 
 class ChannelServerBase(ChannelServer):
 	def __init__(self, port: int):
@@ -50,6 +50,11 @@ def filter_records(
 
 
 def find_free_port():
+	global PORT
+
+	if PORT:
+		return PORT
+
 	with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
 		s.bind(('', 0))
 		return s.getsockname()[1]
