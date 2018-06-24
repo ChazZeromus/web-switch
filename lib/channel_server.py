@@ -15,19 +15,23 @@ import logging
 # TODO: What if instead of an error_type for RouterErrors, have an array of error_types?
 
 
-class ChannelError(RouterError):
+class ChannelServerError(RouterError):
 	def __init__(self, message: str, **data):
-		super(ChannelError, self).__init__(message=message, **{'error_types': 'channel_error', **data})
+		super(ChannelServerError, self).__init__(message=message, **{'error_types': 'channel_error', **data})
 
 
-class ChannelResponseError(RouterResponseError):
+class ChannelServerActionError(RouterError):
+	pass
+
+
+class ChannelServerResponseError(RouterResponseError):
 	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], orig_exc: Exception = None, **data):
 		new_data = dict(data)
 
 		if orig_exc:
 			new_data['exc_class'] = orig_exc.__class__.__name__
 
-		super(ChannelResponseError, self).__init__(message=message, **new_data)
+		super(ChannelServerResponseError, self).__init__(message=message, **new_data)
 		self.error_types.append('channel_response')
 		self.set_guid(self, response)
 
@@ -200,14 +204,12 @@ class ChannelServer(Router):
 
 		try:
 			if action_name is None:
-				raise RouterResponseError(
-					'No action provided' if not action_name else f'Unknown action {action_name!r}'
-				)
+				raise ChannelServerActionError('No action provided')
 
 			action = self.dispatcher.actions.get(action_name)
 
 			if not action:
-				raise RouterResponseError(f'Invalid action {action_name!r}')
+				raise ChannelServerError(f'Invalid action {action_name!r}')
 
 			# Dispatch our action
 			# TODO: Maybe make dispatch() async so we can utilize return values and deprecate completion handler
@@ -216,12 +218,12 @@ class ChannelServer(Router):
 		except RouterError as e:
 			self.logger.warning(f'Caught error while performing action: {e!r}')
 			if response_id:
-				ChannelResponseError.set_guid(e, response_id)
+				ChannelServerResponseError.set_guid(e, response_id)
 			raise
 
 		except Exception as e:
 			self.logger.error(f'dispatch error: {e!r}\n{traceback.format_exc()}')
-			raise ChannelError(f'Unexpected error performing action: {e!r}')
+			raise ChannelServerError(f'Unexpected error performing action: {e!r}')
 
 	def on_remove(self, connection: Connection):
 		# TODO: Remove and cleanup ChannelClients from whatever lists, dicts
@@ -232,7 +234,7 @@ class ChannelServer(Router):
 
 		if not client:
 			self.logger.error(f'Could not find client from connection {connection!r}')
-			raise ChannelError(f'Could not find client with given connection')
+			raise ChannelServerError(f'Could not find client with given connection')
 
 		return client
 
@@ -243,11 +245,11 @@ class ChannelServer(Router):
 		assert isinstance(source, ChannelClient)
 
 		if not isinstance(e, RouterError):
-			e = ChannelResponseError(f'Unexpected non-RouterError exception: {e}', orig_exc=e, response=response_id)
+			e = ChannelServerResponseError(f'Unexpected non-RouterError exception: {e}', orig_exc=e, response=response_id)
 
-		# Try to set response ID even if error isn't ChannelResponseError
+		# Try to set response ID even if error isn't ChannelServerResponseError
 		if response_id:
-			ChannelResponseError.set_guid(e, response_id)
+			ChannelServerResponseError.set_guid(e, response_id)
 
 		source.try_send(Message.error_from_exc(e), response_id)
 

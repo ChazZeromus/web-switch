@@ -85,6 +85,15 @@ async def test_client_timeout(client_with_server: Client):
 	with pytest.raises(ResponseTimeoutException) as excinfo:
 		await convo.send_and_expect({'timeout': 0.2}, timeout=0.1)
 
+@pytest.mark.asyncio
+async def test_unknown_action(client_with_server: Client):
+	convo = client_with_server.convo('this_action_is_fake')
+
+	with pytest.raises(ResponseException) as excinfo:
+		await convo.send_and_expect({})
+
+	assert excinfo.match('Invalid action')
+
 # TODO: Test active source cancelling
 # TODO: On both Client- and Channel-side, should register all timeouts so that upon server close
 # TODO: all pending timeouts are cancelled
