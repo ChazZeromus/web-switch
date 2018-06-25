@@ -11,6 +11,7 @@ from lib.channel_server import ChannelServer
 HOSTNAME = '127.0.0.1'
 PORT = None # None for auto-select
 
+
 class ChannelServerBase(ChannelServer):
 	def __init__(self, port: int):
 		super(ChannelServerBase, self).__init__('localhost', port)

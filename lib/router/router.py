@@ -79,14 +79,31 @@ class Router(object):
 
 		self._server_thread = threading.Thread(target=self._serve_forever)
 		self._interrupt_event = threading.Event()
+		self._ready_event = threading.Event()
 
 		self._close_lock = threading.Lock()
 
 	def get_logger(self):
+		"""
+		Gets logger for this Router instance. Useful for subclasses.
+		:return:
+		"""
 		return self.__logger
 
-	def serve(self, daemon=False):
+	def serve(self, *, daemon=False, block_until_ready=True):
+		"""
+		Starts websocket router.
+		:param daemon: Whether or not to immediately return. If not then this function blocks
+		until the server stops.
+		:param block_until_ready: Whether or not to block (even if daemon is true) until the websocket
+		server is ready. This solves issues where immediately connecting to this server after this call
+		can fail.
+		"""
+		self._ready_event.clear()
 		self._server_thread.start()
+
+		if block_until_ready:
+			self._ready_event.wait()
 
 		if not daemon:
 			try:
@@ -98,6 +115,10 @@ class Router(object):
 			self.stop_serve()
 
 	def stop_serve(self):
+		"""
+		Signal the termination of the websocket server and block until the background thread finishes.
+		:return:
+		"""
 		self._interrupt_event.set()
 		self._server_thread.join()
 
@@ -143,12 +164,13 @@ class Router(object):
 			success = loop_thread.wait_result()
 		except Exception as e:
 			self.__logger.error(f'{loop_thread.exception_traceback}\nCould not start server: {e!r}')
+		finally:
+			self._ready_event.set()
 
 		if success:
 			self.on_start()
 
 			self.__logger.info(f'Serving {self.host}:{self.port}')
-
 			self._interrupt_event.wait()
 
 			self.on_stop()

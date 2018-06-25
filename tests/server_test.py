@@ -42,7 +42,7 @@ def get_server(free_port):
 @pytest.mark.asyncio
 async def test_response_dispatch_timeout(get_server, get_client, caplog):
 	server = get_server()
-	server.serve(True)
+	server.serve(daemon=True)
 
 	async with get_client() as client:
 		convo = client.convo('timeout')
@@ -67,7 +67,7 @@ async def test_response_dispatch_timeout(get_server, get_client, caplog):
 @pytest.mark.asyncio
 async def test_response_dispatch_cancel(get_server, get_client, caplog):
 	server = get_server()
-	server.serve(True)
+	server.serve(daemon=True)
 
 	async with get_client() as client:
 		convo = client.convo('timeout')
