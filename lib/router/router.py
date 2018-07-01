@@ -64,7 +64,7 @@ class Router(object):
 
 		self.closed = False
 
-		self.event_loop = asyncio.new_event_loop()  # type: asyncio.AbstractEventLoop
+		self.event_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
 		self.event_loop.set_debug(True)
 
 		self.connection_index = 0
@@ -284,7 +284,7 @@ class Router(object):
 
 	def _handle_message(self, connection: Connection, data: str) -> None:
 		try:
-			json_obj = json.loads(data)  # type: object
+			json_obj: object = json.loads(data)
 
 			if not isinstance(json_obj, dict):
 				raise Exception('Root value of payload must be object')

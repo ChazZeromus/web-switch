@@ -229,7 +229,7 @@ class ResponseDispatcher(object):
 
 		# Go through each action-having method and clone it to this ResponseDispatcher
 		for name, attr in inspect.getmembers(self.instance, lambda m: hasattr(m, Action.func_attr_tag)):
-			orig_action = getattr(attr, Action.func_attr_tag)  # type: Action
+			orig_action: Action = getattr(attr, Action.func_attr_tag)
 
 			if orig_action.name in self.actions:
 				raise Exception(f'Dispatched function {orig_action.name!r} already exists')
@@ -362,7 +362,7 @@ class ResponseDispatcher(object):
 		if not self.loop_thread:
 			raise DispatchNotStarted
 
-		future = self.loop_thread.event_loop.create_future()  # type: asyncio.Future
+		future: asyncio.Future = self.loop_thread.event_loop.create_future()
 		await_dispatch.set(future, params)
 
 		self.logger.debug(f'Awaiting {await_dispatch!r}')

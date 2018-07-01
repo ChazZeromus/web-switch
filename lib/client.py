@@ -15,7 +15,7 @@ class Client:
 		self.connection = websockets.connect(ws_url)
 		self.ctx = None
 		self.response_id = None
-		self.active_convos = {}  # type: Dict[uuid.UUID, Convo]
+		self.active_convos: Dict[uuid.UUID, Convo] = {}
 		self.logger = g_logger.getChild('Client')
 		self._loop_fut = None
 
@@ -50,7 +50,7 @@ class Client:
 	async def _recv_loop(self):
 		async for response in self.ctx:
 			try:
-				data = json.loads(response)  # type: dict
+				data: Dict = json.loads(response)
 
 				message = Message()
 				message.load(data)
@@ -113,13 +113,13 @@ class Convo:
 		self.ctx = client.ctx
 		self.guid = uuid.uuid4()
 
-		self.queue = asyncio.Queue()  # type: asyncio.Queue
+		self.queue: asyncio.Queue = asyncio.Queue()
 
 		Convo.last_convo_id += 1
 		self.id = Convo.last_convo_id
 		self.logger = self.client.logger.getChild(f'convo:{self.action}:{self.id}')
 
-		self._active_expects = set()  # type: Set[_ActiveItem]
+		self._active_expects: Set[_ActiveItem] = set()
 
 	def cancel_expects(self):
 		for active_item in list(self._active_expects):
