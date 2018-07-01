@@ -16,7 +16,7 @@ import logging
 
 
 class ChannelServerError(RouterError):
-	def __init__(self, message: str, **data):
+	def __init__(self, message: str, **data) -> None:
 		super(ChannelServerError, self).__init__(message=message, **{'error_types': 'channel_error', **data})
 
 
@@ -25,7 +25,7 @@ class ChannelServerActionError(RouterError):
 
 
 class ChannelServerResponseError(RouterResponseError):
-	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], orig_exc: Exception = None, **data):
+	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], orig_exc: Exception = None, **data) -> None:
 		new_data = dict(data)
 
 		if orig_exc:
@@ -41,7 +41,7 @@ class ChannelServerResponseError(RouterResponseError):
 
 
 class ClientACL:
-	def __init__(self, **kwargs):
+	def __init__(self, **kwargs) -> None:
 		self.is_admin = False
 
 		for key, val in kwargs:
@@ -53,11 +53,11 @@ class ClientACL:
 
 # TODO: Create a ChannelClient class that can have multiple Connections
 class ChannelClient(object):
-	def __init__(self, channel: 'ChannelServer', conn: Optional[Connection], **kwargs):
+	def __init__(self, channel: 'ChannelServer', conn: Connection, **kwargs) -> None:
 		self.channel = channel
 		self.conn = conn
 		self.acl = ClientACL(**kwargs)
-		self.name = None  # type: str
+		self.name = None  # type: Optional[str]
 
 	async def send(self, message: Message, response_id: Optional[uuid.UUID]):
 		if response_id is not None:
@@ -75,7 +75,7 @@ class ChannelClient(object):
 
 
 class Conversation(AbstractAwaitDispatch):
-	def __init__(self, client: ChannelClient, original: AwaitDispatch):
+	def __init__(self, client: ChannelClient, original: AwaitDispatch) -> None:
 		self.await_dispatch = original
 		self.client = client
 
@@ -93,8 +93,8 @@ class Conversation(AbstractAwaitDispatch):
 class ChannelServer(Router):
 	_common_intrinsic_params = {
 		'client': ChannelClient
-	}
-	_common_exposed_params = {}
+	}  # type: Dict[str, Type]
+	_common_exposed_params = {}  # type: Dict[str, Type]
 
 	non_async_params = ParameterSet(exposed=_common_exposed_params, intrinsic=_common_intrinsic_params)
 	async_params = ParameterSet(
@@ -105,7 +105,7 @@ class ChannelServer(Router):
 		}
 	)
 
-	def __init__(self, host: str, port: int, max_queue_size: int = 100):
+	def __init__(self, host: str, port: int, max_queue_size: int = 100) -> None:
 		super(ChannelServer, self).__init__(host, port, max_queue_size)
 		self.channels = {}  # type: Dict[Tuple[str, str], Set[ChannelClient]]
 		self.conn_to_client = {}  # type: Dict[Connection, ChannelClient]
@@ -123,7 +123,7 @@ class ChannelServer(Router):
 			argument_hook=self.argument_hook,
 		)
 
-		self.stop_timeout = None
+		self.stop_timeout = None  # type: Optional[float]
 
 		self.logger = self.get_logger().getChild(f'ChannelRouter:{self.id}')
 		self.logger.info('Creating channel server')
@@ -160,7 +160,7 @@ class ChannelServer(Router):
 		super(ChannelServer, self).stop_serve()
 
 	def on_new(self, connection: Connection, path: str) -> None:
-		groups = {'channel': None, 'room': None}
+		groups = {}  # type: Dict[str, str]
 
 		try:
 			# Check if new connection provided a channel and room

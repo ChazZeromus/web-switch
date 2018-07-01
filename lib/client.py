@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 import traceback
-from typing import Dict, Optional, Union, Set, NamedTuple
+from typing import *
 
 import websockets
 
@@ -98,22 +98,22 @@ class Client:
 
 
 class _ActiveItem(NamedTuple):
-	data_future: asyncio.Future = None
-	timeout_future: asyncio.Future = None
-	retrieve_future: asyncio.Future = None
+	data_future: asyncio.Future
+	timeout_future: Optional[asyncio.Future]
+	retrieve_future: asyncio.Future
 
 
 class Convo:
 	last_convo_id = 0
 
-	def __init__(self, action: str, client: Client):
+	def __init__(self, action: str, client: Client) -> None:
 		self.client = client
 		self.action = action
 
 		self.ctx = client.ctx
 		self.guid = uuid.uuid4()
 
-		self.queue = asyncio.Queue()
+		self.queue = asyncio.Queue()  # type: asyncio.Queue
 
 		Convo.last_convo_id += 1
 		self.id = Convo.last_convo_id
@@ -123,7 +123,8 @@ class Convo:
 
 	def cancel_expects(self):
 		for active_item in list(self._active_expects):
-			active_item.timeout_future.cancel() # TODO: threadsafe?
+			if active_item.timeout_future:
+				active_item.timeout_future.cancel() # TODO: threadsafe?
 			active_item.retrieve_future.cancel()
 			active_item.data_future.set_exception(ClientShutdownException())
 
@@ -147,7 +148,7 @@ class Convo:
 	async def expect(self, timeout: Optional[float]) -> Message:
 		self.logger.debug(f'Waiting {timeout if timeout else "indefinitely"} seconds for response')
 
-		active_item = None  # type: _ActiveItem
+		active_item: Optional[_ActiveItem] = None
 
 		async def timeout_callback():
 			await asyncio.sleep(timeout)

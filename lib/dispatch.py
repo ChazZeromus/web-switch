@@ -31,11 +31,13 @@ class ParameterSet(NamedTuple):
 	def all(self):
 		return {**self.exposed, **self.intrinsic}
 
-	def __add__(self, other: 'ParameterSet'):
-		return ParameterSet(
-			exposed={**self.exposed, **other.exposed},
-			intrinsic={**self.intrinsic, **other.intrinsic},
-		)
+	def __add__(self, other: Tuple):
+		if isinstance(other, ParameterSet):
+			return ParameterSet(
+				exposed={**self.exposed, **other.exposed},
+				intrinsic={**self.intrinsic, **other.intrinsic},
+			)
+		return super(other)
 
 # TODO: When sending errors, provide the response_id if possible
 # TODO: For coroutine actions, perhaps implement a sort of session heartbeat for possible
@@ -90,10 +92,10 @@ class ResponseDispatcher(object):
 		instance: object,
 		common_params: ParameterSet,
 		exception_handler: Callable[[object, str, Exception, Optional[uuid.UUID]], Coroutine],
-		complete_handler: Callable[[object, str, Any, Optional[uuid.UUID]], None] = None,
-		argument_hook: Callable[[Dict, object, 'Action'], Dict] = None,
+		complete_handler: Optional[Callable[[object, str, Any, Optional[uuid.UUID]], None]] = None,
+		argument_hook: Optional[Callable[[Dict, object, 'Action'], Dict]] = None,
 		common_async_params: ParameterSet = ParameterSet(),
-	):
+	) -> None:
 		"""
 		:param instance: Value of the 'self' parameter when dispatching actions.
 		:param common_params: Common parameters that this dispatcher will include in addition to each action's individual
@@ -129,7 +131,7 @@ class ResponseDispatcher(object):
 		self._exc_handler = exception_handler
 		self._complete_handler = complete_handler
 
-		self._arg_hook = argument_hook  # type: Callable[[Dict, object, 'Action'], Dict]
+		self._arg_hook = argument_hook
 
 		self.actions = {}  # type: Dict[str, 'Action']
 
@@ -310,7 +312,7 @@ class ResponseDispatcher(object):
 		Verifies that the given arguments are valid for the action without taking into account any intrinsics
 		and type checking.
 		"""
-		invalid_args = list(set(action.intrinsic_params) & set(args.keys()))
+		invalid_args = list(set(action.intrinsic_params or []) & set(args.keys()))
 
 		if invalid_args:
 			raise DispatchArgumentError(f'Specified intrinsic parameters: {invalid_args}')
