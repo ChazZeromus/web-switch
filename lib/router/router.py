@@ -55,12 +55,12 @@ def _route_thread(
 class Router(object):
 	router_last_id = 0
 
-	def __init__(self, host: str, port: int, max_queue_size: int = 100):
+	def __init__(self, host: str, port: int, max_queue_size: int = 100) -> None:
 		self.host, self.port = host, port
 
 		self.connection_list = ConnectionList()
 
-		self.receive_queue = Queue(max_queue_size)
+		self.receive_queue: Queue = Queue(max_queue_size)
 
 		self.closed = False
 
@@ -222,7 +222,7 @@ class Router(object):
 		with self._close_lock:
 			return self.closed
 
-	async def handle_connect(self, websocket: [WebSocketServerProtocol, AsyncIterable], path: str) -> None:
+	async def handle_connect(self, websocket: WebSocketServerProtocol, path: str) -> None:
 		if self._is_closed():
 			self.__logger.warning('Server is closing, rejecting connection', websocket)
 			return
@@ -243,7 +243,7 @@ class Router(object):
 
 			# Reject if it was closed or nothing was returned
 			if connection.closed:
-				raise RouterConnectionError(connection.close_reason)
+				raise RouterConnectionError(connection.close_reason or 'No reason')
 
 			# Add connection to pool if everything went well
 			self.connection_list.add(connection)

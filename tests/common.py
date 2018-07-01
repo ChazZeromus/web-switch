@@ -13,7 +13,7 @@ PORT = None # None for auto-select
 
 
 class ChannelServerBase(ChannelServer):
-	def __init__(self, port: int):
+	def __init__(self, port: int) -> None:
 		super(ChannelServerBase, self).__init__('localhost', port)
 
 	def __enter__(self):

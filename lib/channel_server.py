@@ -17,15 +17,17 @@ import logging
 
 class ChannelServerError(RouterError):
 	def __init__(self, message: str, **data) -> None:
-		super(ChannelServerError, self).__init__(message=message, **{'error_types': 'channel_error', **data})
+		super(ChannelServerError, self).__init__('channel_error', message=message, **data)
 
 
-class ChannelServerActionError(RouterError):
-	pass
+class ChannelServerActionError(ChannelServerError):
+	def __init__(self, message: str, **data) -> None:
+		super(ChannelServerActionError, self).__init__(message, **data)
+		self.error_types.append('channel_action_error')
 
 
 class ChannelServerResponseError(RouterResponseError):
-	def __init__(self, message: str, response: Union[uuid.UUID, 'AwaitDispatch'], orig_exc: Exception = None, **data) -> None:
+	def __init__(self, message: str, response: Optional[Union[uuid.UUID, 'AwaitDispatch']], orig_exc: Exception = None, **data) -> None:
 		new_data = dict(data)
 
 		if orig_exc:
@@ -33,7 +35,9 @@ class ChannelServerResponseError(RouterResponseError):
 
 		super(ChannelServerResponseError, self).__init__(message=message, **new_data)
 		self.error_types.append('channel_response')
-		self.set_guid(self, response)
+
+		if response:
+			self.set_guid(self, response)
 
 	@staticmethod
 	def set_guid(exception: RouterError, response: Union[uuid.UUID, 'AwaitDispatch']):
@@ -111,8 +115,6 @@ class ChannelServer(Router):
 		self.conn_to_client = {}  # type: Dict[Connection, ChannelClient]
 
 		self.host, self.port = host, port
-
-		self.broadcast_client = ChannelClient(self, None)
 
 		self.dispatcher = ResponseDispatcher(
 			common_params=self.non_async_params,
@@ -239,7 +241,7 @@ class ChannelServer(Router):
 		return client
 
 	# Define our exception handler for actions so we can send back a
-	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID = None):
+	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID):
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
 		assert isinstance(source, ChannelClient)
@@ -254,7 +256,7 @@ class ChannelServer(Router):
 		source.try_send(Message.error_from_exc(e), response_id)
 
 	# Define our completer when actions complete and return
-	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID = None):
+	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID):
 		assert isinstance(source, ChannelClient)
 
 		if isinstance(result, Dict):

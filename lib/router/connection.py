@@ -10,7 +10,7 @@ from lib.logger import g_logger
 
 
 class ConnectionList:
-	def __init__(self):
+	def __init__(self) -> None:
 		self.connections = []  # type: List[Connection]
 		self._lock = threading.Lock()
 		self.last_connection_id = 0
@@ -48,7 +48,13 @@ class ConnectionList:
 
 
 class Connection(object):
-	def __init__(self, conn_list: ConnectionList, event_loop: asyncio.AbstractEventLoop, ws: WebSocketServerProtocol = None, **extra_kwargs):
+	def __init__(
+		self,
+		conn_list: ConnectionList,
+		event_loop: asyncio.AbstractEventLoop,
+		ws: WebSocketServerProtocol = None,
+		**extra_kwargs
+	) -> None:
 		self.extra = extra_kwargs
 		self.ws = ws  # type: WebSocketServerProtocol
 		self.event_loop = event_loop

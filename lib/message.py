@@ -21,7 +21,7 @@ class Message(object):
 			success: bool = None,
 			error: str = None,
 			error_data: Dict = None
-		):
+		) -> None:
 		self.data = deepcopy(data) if data is not None else {}
 		self.success = success
 		self.error = error

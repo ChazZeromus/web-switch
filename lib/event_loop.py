@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 import traceback
-from typing import Callable, Optional
+from typing import *
 from queue import Queue as thread_Queue
 from multiprocessing import Queue as mp_Queue
 import concurrent.futures as futures
@@ -21,7 +21,7 @@ class EventLoopThread(threading.Thread):
 			group=None,
 			target=None,
 			name=None, *,
-			daemon=None):
+			daemon=None) -> None:
 
 		EventLoopThread.event_loop_thread_latest_id += 1
 		self.id = EventLoopThread.event_loop_thread_latest_id
@@ -37,6 +37,8 @@ class EventLoopThread(threading.Thread):
 			kwargs={},
 			daemon=daemon
 		)
+
+		self._queue_factory: Union[Type[thread_Queue], Type[mp_Queue]]
 
 		if isinstance(executor, futures.ProcessPoolExecutor):
 			self._queue_factory = mp_Queue
