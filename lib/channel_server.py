@@ -77,7 +77,6 @@ class ChannelClient(object):
 
 		self.channel.try_send_messages([self.conn], message)
 
-
 class Conversation(AbstractAwaitDispatch):
 	def __init__(self, client: ChannelClient, original: AwaitDispatch) -> None:
 		self.await_dispatch = original
@@ -130,22 +129,19 @@ class ChannelServer(Router):
 		self.logger = self.get_logger().getChild(f'ChannelRouter:{self.id}')
 		self.logger.info('Creating channel server')
 
-	def argument_hook(self, args: Dict, source: object, action: Action) -> Dict:
-		await_dispatch = args.get('await_dispatch')
+	def argument_hook(self, args: Dict[str, Any], source: object, action: Action) -> Dict:
+		assert isinstance(source, ChannelClient)
+
+		await_dispatch: Optional[AwaitDispatch] = args.get('await_dispatch')
 
 		new_args = args.copy()
 
+		self.logger.debug(f'Processing argument hook for {action!r}')
+
 		if await_dispatch:
-			assert isinstance(source, ChannelClient)
 			assert isinstance(await_dispatch, AwaitDispatch)
-
 			new_conversation = Conversation(client=source, original=await_dispatch)
-
-			# TODO: Having to use a class specific copy method for subclasses seems awkward, instead
-			# TODO: why not provide an interface for
 			new_args.update(convo=new_conversation)
-
-		assert isinstance(source, ChannelClient)
 
 		new_args['client'] = source
 
@@ -268,8 +264,12 @@ class ChannelServer(Router):
 	def action_whoami(self, client: ChannelClient):
 		return {'id': client.conn.conn_id}
 
+	@add_action(params={'targets': list})
+	def action_send(self, targets: List[int], client: ChannelClient):
+		pass
+
 	@add_action()
-	def action_message(self, client: ChannelClient):
+	def action_enum_clients(self, client: ChannelClient):
 		pass
 
 

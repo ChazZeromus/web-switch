@@ -65,7 +65,7 @@ class Connection(object):
 		self._close_event = asyncio.Event(loop=self.event_loop)
 
 		self.close_reason: Optional[str] = None
-		self.close_code: Optional[str] = None
+		self.close_code: Optional[int] = None
 		self.in_pool = False
 
 		self.conn_id = conn_list.generate_id()

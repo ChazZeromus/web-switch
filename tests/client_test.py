@@ -1,4 +1,5 @@
 from asyncio import sleep as async_sleep
+from typing import *
 
 from lib.router.errors import RouterError
 from lib.client import ResponseException, ResponseTimeoutException
@@ -34,8 +35,8 @@ class ClientTestingServer(ChannelServerBase):
 		await convo.send({'data': 'all done!'})
 
 
-@pytest.fixture(scope='function')
-def get_server(free_port):
+@pytest.fixture(name='get_server', scope='function')
+def get_server_fixture(free_port) -> Callable[[], ClientTestingServer]:
 	def func():
 		return ClientTestingServer(free_port)
 

@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Type, Tuple, Optional, Union, NamedTuple, Iterable, Any, Set, Coroutine
+from typing import *
 from threading import Lock
 import asyncio
 import uuid
@@ -52,7 +52,7 @@ class ResponseDispatcher(object):
 
 		class Foo:
 			def __init__(self):
-				self.dispatcher = self.dispatch(self, params={})
+				self.dispatcher = ResponseDispatcher(self)
 				self.dispatcher.start()
 
 			def dispatching_method(self, data: Dict):
@@ -66,7 +66,7 @@ class ResponseDispatcher(object):
 	that were dispatched for that particular action by using the callable that is always
 	provided
 
-	Since all dispatching occurs through one method `dispatch()`, routing which messages to what
+	Since all dispatching occurs through one method `dispatch()`, routing which messages to what instance of an
 	awaiting action is done by specifying an extra argument `response_id` to `dispatch()`. Applications
 	just need to ensure clients must provide a response ID if they're responding to that particular action.
 
@@ -89,8 +89,8 @@ class ResponseDispatcher(object):
 	def __init__(
 		self,
 		instance: object,
-		common_params: ParameterSet,
-		exception_handler: Callable[[object, str, Exception, uuid.UUID], Coroutine],
+		common_params: ParameterSet = ParameterSet(),
+		exception_handler: Optional[Callable[[object, str, Exception, uuid.UUID], Coroutine]] = None,
 		complete_handler: Optional[Callable[[object, str, Any, uuid.UUID], None]] = None,
 		argument_hook: Optional[Callable[[Dict, object, 'Action'], Dict]] = None,
 		common_async_params: ParameterSet = ParameterSet(),
@@ -539,15 +539,19 @@ class ResponseDispatcher(object):
 					return await dispatch_future
 
 				except Exception as exc:
-					# Call exception handler if something happened
-					try:
-						if asyncio.iscoroutinefunction(self._exc_handler):
-							await self._exc_handler(source, action_name, exc, response_guid)
-						else:
-							self._exc_handler(source, action_name, exc, response_guid)
+					if self._exc_handler:
+						self.logger.debug(f'Calling exception handler for {await_dispatch or action!r}')
+						# Call exception handler if something happened
+						try:
+							if asyncio.iscoroutinefunction(self._exc_handler):
+								await self._exc_handler(source, action_name, exc, response_guid)
+							else:
+								self._exc_handler(source, action_name, exc, response_guid)
 
-					except Exception as exc_exc:
-						self.logger.error(f'Unexpected error while running exception handler: {exc_exc}')
+						except Exception as exc_exc:
+							self.logger.error(f'Unexpected error while running exception handler: {exc_exc}')
+					else:
+						self.logger.error(f'Error occurred in dispatch in {await_dispatch or action!r}: {exc!r}')
 
 					# Raise so future does not invoke complete handler
 					raise

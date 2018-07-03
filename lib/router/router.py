@@ -53,6 +53,18 @@ def _route_thread(
 
 
 class Router(object):
+	"""
+	Simple extendable Routing class that processes websocket connections for the following events:
+		on_stop()
+		on_start()
+		on_new(connection, path)
+		on_message(connection, message)
+		on_remove(connection)
+
+	And provides the following *protected* methods:
+		send_messages()
+		try_send_messages()
+	"""
 	router_last_id = 0
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100) -> None:

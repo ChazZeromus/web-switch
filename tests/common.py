@@ -25,6 +25,7 @@ class ChannelServerBase(ChannelServer):
 
 # TODO: raise NotImplement() version of get_server should be defined here?
 
+
 @pytest.fixture(scope='function')
 async def client_with_server(get_client, get_server):
 	with get_server():

@@ -176,7 +176,12 @@ after. This causes issues as the server may not be finished and is ended prematu
 amount of time, we could some how await the server destruction until it processed the last message? The only way to reliably
 await server destruction is if we keep track of client messages sent to server make sure all of them are processed in
 the server before destruction. But this seems a bit hacky as the server knows exactly what messages to receive.
-    Done, Added a simple 5 second timeout for now that cancels AwaitDispatches and Actions on timeout
+    Done, Added a simple 5 second timeout for now that cancels AwaitDispatches and Actions on timeout.
 
 Allow intrinsic parameters to be optionally specified? Will probably have to modify verify_exposed and verify_full methods
 to allow them to be optional.
+
+Make Channel and Room classes. Handling any possible permissions and behaviors.
+    This seems like it might not be needed, it would make more sense to wrap these
+    into a 'class-package' if there were a lot of channel and room specific behaviors
+    that need to be templated.
