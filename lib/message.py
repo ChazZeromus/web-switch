@@ -27,7 +27,7 @@ class Message(object):
 		self.error = error
 		self.error_data = error_data
 
-	def load(self, json_data):
+	def load(self, json_data) -> 'Message':
 		self.data = deepcopy(json_data)
 
 		self.success = json_data.get('success')

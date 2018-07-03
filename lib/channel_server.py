@@ -44,38 +44,48 @@ class ChannelServerResponseError(RouterResponseError):
 		exception.error_data['response_id'] = response
 
 
-class ClientACL:
-	def __init__(self, **kwargs) -> None:
-		self.is_admin = False
-
-		for key, val in kwargs:
-			if not hasattr(self, key):
-				raise Exception(f'Unknown ACL entry {key!r}')
-
-			setattr(self, key, val)
-
-
 # TODO: Create a ChannelClient class that can have multiple Connections
 class ChannelClient(object):
 	def __init__(self, channel: 'ChannelServer', conn: Connection, **kwargs) -> None:
 		self.channel = channel
-		self.conn = conn
-		self.acl = ClientACL(**kwargs)
+		self.conns = [conn]
 		self.name: Optional[str] = None
+		self._room_key: Optional[Tuple[str, str]] = None
+
+		self.id = channel.get_next_client_id()
+
+		self.logger = channel.get_logger().getChild(f'ChannelClient:{self.id}')
+		self.logger.debug(f'Created channel client {self!r}')
+
+	def get_room_key(self):
+		if not self._room_key:
+			raise ChannelServerError('No room key to retrieve')
+
+		return self._room_key
+
+	def set_room_key(self, key: Tuple[str, str]):
+		self._room_key = key
 
 	async def send(self, message: Message, response_id: Optional[uuid.UUID]):
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
-		await self.channel.send_messages([self.conn], message)
+		await self.channel.send_messages(self.conns, message)
 
 	def try_send(self, message: Message, response_id: Optional[uuid.UUID]):
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
-		self.channel.try_send_messages([self.conn], message)
+		self.channel.try_send_messages(self.conns, message)
+
+	def __repr__(self):
+		return f'ChannelClient(id:{self.id},conns:{len(self.conns)})'
+
+	def __str__(self):
+		return repr(self)
+
 
 class Conversation(AbstractAwaitDispatch):
 	def __init__(self, client: ChannelClient, original: AwaitDispatch) -> None:
@@ -110,8 +120,9 @@ class ChannelServer(Router):
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100) -> None:
 		super(ChannelServer, self).__init__(host, port, max_queue_size)
-		self.channels: Dict[Tuple[str, str], Set[ChannelClient]] = {}
+		self.rooms: Dict[Tuple[str, str], Set[ChannelClient]] = {}
 		self.conn_to_client: Dict[Connection, ChannelClient] = {}
+		self.id_to_client: Dict[int, ChannelClient] = {}
 
 		self.host, self.port = host, port
 
@@ -126,8 +137,17 @@ class ChannelServer(Router):
 
 		self.stop_timeout: Optional[float] = None
 
-		self.logger = self.get_logger().getChild(f'ChannelRouter:{self.id}')
+		self.logger = super(ChannelServer, self).get_logger().getChild(f'ChannelRouter:{self.id}')
 		self.logger.info('Creating channel server')
+
+		self.last_client_id = 0
+
+	def get_logger(self) -> logging.Logger:
+		return self.logger
+
+	def get_next_client_id(self):
+		self.last_client_id += 1
+		return self.last_client_id
 
 	def argument_hook(self, args: Dict[str, Any], source: object, action: Action) -> Dict:
 		assert isinstance(source, ChannelClient)
@@ -146,6 +166,40 @@ class ChannelServer(Router):
 		new_args['client'] = source
 
 		return new_args
+
+	def handle_new_connection(
+		self,
+		key: Tuple[str, str],
+		connection: Connection,
+		room: Set[ChannelClient],
+		other_data: Optional[str],
+	) -> None:
+		if other_data:
+			client_id = int(other_data)
+			client = self.id_to_client[client_id]
+			client.conns.append(connection)
+		else:
+			client = ChannelClient(self, connection)
+			room.add(client)
+			client.set_room_key(key)
+
+		self.conn_to_client[connection] = client
+
+		self.logger.info(f'Added web-switch connection {connection!r} to {client!r} as Channel connection to room {key!r}')
+
+	def handle_remove_connection(self, connection: Connection) -> None:
+		client = self.conn_to_client[connection]
+
+		del self.conn_to_client[connection]
+
+		client.conns.remove(connection)
+
+		self.logger.info(f'Removed connection {connection!r} from {client!r}')
+
+		if not client.conns:
+			room = self.rooms[client.get_room_key()]
+			room.remove(client)
+			self.logger.info(f'Removed last connection of {client!r}, removed client')
 
 	def on_start(self):
 		self.dispatcher.start()
@@ -175,24 +229,23 @@ class ChannelServer(Router):
 
 			key = (groups['channel'], groups['room'])
 
-			channel = self.channels.get(key)
+			room = self.rooms.get(key)
 
 			# For now if the room doesn't exist, create it.
 			# TODO: Impl auth room master auth of some kind
-			if channel is None:
+			if room is None:
 				self.logger.info(f'Channel {key!r} does not exist, creating')
 
-				self.channels[key] = channel = set()
+				self.rooms[key] = room = set()
 
-			# Create our channel connection instance
-			new_client = ChannelClient(self, connection)
-			self.conn_to_client[connection] = new_client
-			channel.add(new_client)
-
-			self.logger.debug(f'Added web-switch connection {connection!r} as Channel connection to {key!r}')
+			self.handle_new_connection(key, connection, room, groups.get('other'))
 
 		except Exception as e:
 			connection.close(reason=str(e))
+
+	def on_remove(self, connection: Connection):
+		# TODO: Remove and cleanup ChannelClients from whatever lists, dicts
+		self.handle_remove_connection(connection)
 
 	def on_message(self, connection: Connection, message: Message):
 		action_name = message.data.get('action')
@@ -222,10 +275,6 @@ class ChannelServer(Router):
 		except Exception as e:
 			self.logger.error(f'dispatch error: {e!r}\n{traceback.format_exc()}')
 			raise ChannelServerError(f'Unexpected error performing action: {e!r}')
-
-	def on_remove(self, connection: Connection):
-		# TODO: Remove and cleanup ChannelClients from whatever lists, dicts
-		pass
 
 	def _get_client(self, connection: Connection):
 		client = self.conn_to_client.get(connection)
@@ -262,7 +311,7 @@ class ChannelServer(Router):
 
 	@add_action()
 	def action_whoami(self, client: ChannelClient):
-		return {'id': client.conn.conn_id}
+		return {'id': client.id}
 
 	@add_action(params={'targets': list})
 	def action_send(self, targets: List[int], client: ChannelClient):
@@ -270,7 +319,8 @@ class ChannelServer(Router):
 
 	@add_action()
 	def action_enum_clients(self, client: ChannelClient):
-		pass
+		clients = self.rooms[client.get_room_key()]
+		return {'client_ids': list(map(lambda c: c.id, clients))}
 
 
 def cli_main():

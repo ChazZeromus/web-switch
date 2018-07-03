@@ -96,6 +96,21 @@ async def test_unknown_action(client_with_server: Client):
 
 	assert excinfo.match('Invalid action')
 
+@pytest.mark.asyncio
+async def test_enum(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+	with get_server() as server:
+		async with get_client() as client1, get_client() as client2:
+			await async_sleep(0.1)
+			message = await client1.convo('enum_clients').send_and_expect({})
+
+			data = message.data
+
+			assert isinstance(data, dict)
+			assert 'client_ids' in data
+			assert isinstance(data['client_ids'], list)
+			assert len(data['client_ids']) == 2
+
+
 # TODO: Test active source cancelling
 # TODO: On both Client- and Channel-side, should register all timeouts so that upon server close
 # TODO: all pending timeouts are cancelled
