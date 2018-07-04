@@ -314,9 +314,24 @@ class ChannelServer(Router):
 	def action_whoami(self, client: ChannelClient):
 		return {'id': client.id}
 
-	@add_action(params={'targets': list})
-	def action_send(self, targets: List[int], client: ChannelClient):
-		pass
+	@add_action(params={'targets': list, 'data': dict})
+	async def action_send(self, convo: Conversation, targets: List[int], data: dict, client: ChannelClient):
+		this_key = client.get_room_key()
+		target_clients: List[ChannelClient] = []
+
+		# Find invalid IDs
+		for target_id in targets:
+			client_ = self.id_to_client.get(target_id)
+
+			if not client_ or client_.get_room_key() != this_key:
+				raise ChannelServerActionError('Invalid target id')
+
+			target_clients.append(client_)
+
+		message = Message(data)
+
+		for client_ in target_clients:
+			client_.try_send(message, response_id=None)
 
 	@add_action()
 	def action_enum_clients(self, client: ChannelClient):

@@ -134,6 +134,16 @@ async def test_enum(count: int, get_client: Callable[[], Client], get_server: Ca
 		assert enum_ids == collected_ids
 
 
+@pytest.mark.asyncio
+async def test_send(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+	with get_server():
+		async with get_client() as client1, get_client() as client2:
+			await client1.convo('send').send({
+				'targets': [client2.client_id],
+				'data': {'msg': 'yo'}
+			})
+
+
 # TODO: Test active source cancelling
 # TODO: On both Client- and Channel-side, should register all timeouts so that upon server close
 # TODO: all pending timeouts are cancelled

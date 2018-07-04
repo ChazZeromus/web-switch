@@ -185,3 +185,16 @@ Make Channel and Room classes. Handling any possible permissions and behaviors.
     This seems like it might not be needed, it would make more sense to wrap these
     into a 'class-package' if there were a lot of channel and room specific behaviors
     that need to be templated.
+
+When a client sends a message to another client, there isn't a way to receive the message as another message without
+being in an a conversation. We could allow blank response IDs but that could cause issues where the payload could be
+pushed up the queue and never retrieved. Though this problem is natural to responses that do have response IDs, an ideal
+solution to this problem regardless of guid would be to have a queue for each conversation that all comes from one additional
+queue that does not belong to any particular conversation.
+
+X Queue                  123 Queue      567 Queue
+
+[msg: foo, guid: None]
+[msg: dff, guid: 123]---->[ ]
+[msg: bar, guid: 123]---->[ ]
+[msg: bah, guid: 567]------------------> [ ]

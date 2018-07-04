@@ -5,16 +5,20 @@ import traceback
 from typing import *
 
 import websockets
+from websockets.client import Connect as WebSocketConnection
+from websockets.client import WebSocketClientProtocol
 
 from lib.message import Message
 from lib.logger import g_logger
 
+WHOAMI_WAIT = 2.0
 
 class Client:
 	def __init__(self, ws_url):
-		self.connection = websockets.connect(ws_url)
+		self.connection: WebSocketConnection = websockets.connect(ws_url)
+		# self.ctx: Optional[WebSocketClientProtocol] = None
 		self.ctx = None
-		self.response_id = None
+		self.client_id: Optional[int] = None
 		self.active_convos: Dict[uuid.UUID, Convo] = {}
 		self.logger = g_logger.getChild('Client')
 		self._loop_fut = None
@@ -23,6 +27,11 @@ class Client:
 		self.ctx = await self.connection.__aenter__(*args, **kwargs)
 		self._loop_fut = asyncio.ensure_future(self._recv_loop())
 		self.logger.debug('Entering')
+
+		message = await self.convo('whoami').send_and_expect({}, WHOAMI_WAIT)
+
+		self.client_id = message.data['id']
+
 		return self
 
 	async def __aexit__(self, exc_type, exc_value, traceback) -> None:
@@ -110,8 +119,13 @@ class Convo:
 		self.client = client
 		self.action = action
 
-		self.ctx = client.ctx
+		if not client.ctx or not client.client_id:
+			raise NoContextException()
+
+		self.ctx: WebSocketClientProtocol = client.ctx
 		self.guid = uuid.uuid4()
+
+		self.client_id: int = client.client_id
 
 		self.queue: asyncio.Queue = asyncio.Queue()
 
@@ -124,13 +138,16 @@ class Convo:
 	def cancel_expects(self):
 		for active_item in list(self._active_expects):
 			if active_item.timeout_future:
-				active_item.timeout_future.cancel() # TODO: threadsafe?
+				active_item.timeout_future.cancel()  # TODO: threadsafe?
 			active_item.retrieve_future.cancel()
 			active_item.data_future.set_exception(ClientShutdownException())
 
 			self._active_expects.remove(active_item)
 
 	async def send(self, data: Union[dict, Message]):
+		if not self.ctx:
+			raise NoContextException()
+
 		if isinstance(data, dict):
 			message = Message(data=data)
 		elif isinstance(data, Message):
@@ -186,15 +203,23 @@ class Convo:
 		return await self.expect(timeout)
 
 
-class ReceiveException(Exception):
+class ClientException(Exception):
 	pass
 
 
-class ClientShutdownException(Exception):
+class ReceiveException(ClientException):
+	pass
+
+
+class NoContextException(ClientException):
 	pass
 
 
 class ResponseTimeoutException(ReceiveException):
+	pass
+
+
+class ClientShutdownException(ClientException):
 	pass
 
 
