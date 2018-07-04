@@ -1,15 +1,15 @@
 import fnmatch
 import socket
 from contextlib import closing
-from typing import Iterable, Tuple, List
+from typing import *
 
 import pytest
 
 from lib.client import Client
 from lib.channel_server import ChannelServer
 
-HOSTNAME = '127.0.0.1'
-PORT = None # None for auto-select
+HOSTNAME: str = '127.0.0.1'
+PORT: Optional[int] = None  # None for auto-select
 
 
 class ChannelServerBase(ChannelServer):
@@ -73,3 +73,15 @@ def get_client(free_port):
 		return Client(f'ws://{HOSTNAME}:{free_port}/foo/bar')
 
 	return func
+
+
+__all__ = [
+	'get_client',
+	'free_port',
+	'find_free_port',
+	'filter_records',
+	'client_with_server',
+	'ChannelServerBase',
+	'HOSTNAME',
+	'PORT',
+]

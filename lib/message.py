@@ -1,7 +1,7 @@
 import json
 import uuid
 from copy import deepcopy
-from typing import Dict
+from typing import *
 
 from lib.router.errors import RouterError
 
@@ -16,16 +16,16 @@ class MessageJSONEncoder(json.JSONEncoder):
 
 class Message(object):
 	def __init__(
-			self,
-			data: dict = None,
-			success: bool = None,
-			error: str = None,
-			error_data: Dict = None
-		) -> None:
-		self.data = deepcopy(data) if data is not None else {}
-		self.success = success
-		self.error = error
-		self.error_data = error_data
+		self,
+		data: dict = None,
+		success: bool = None,
+		error: str = None,
+		error_data: Dict = None
+	) -> None:
+		self.data: Dict = deepcopy(data) if data is not None else {}
+		self.success: Optional[bool] = success
+		self.error: Optional[str] = error
+		self.error_data: Optional[Dict] = error_data
 
 	def load(self, json_data) -> 'Message':
 		self.data = deepcopy(json_data)
@@ -41,13 +41,9 @@ class Message(object):
 		return self
 
 	@classmethod
-	def error(cls, message, **error_data):
-		return Message(success=False, error=message, error_data=error_data)
-
-	@classmethod
-	def error_from_exc(cls, exception: BaseException):
-		if isinstance(exception, RouterError):
-			error_data = exception.error_data.copy()
+	def error_from_exc(cls, exc: BaseException):
+		if isinstance(exc, RouterError):
+			error_data = exc.error_data.copy()
 
 			# Try to decode error data, if successful then we can serialize it
 			# if not then turn it into a repr'd string and send that instead.
@@ -58,18 +54,24 @@ class Message(object):
 					error_data[key] = repr(value)
 
 			if not error_data.get('exc_class'):
-				error_data['exc_class'] = exception.__class__.__name__
+				error_data['exc_class'] = exc.__class__.__name__
 
-			return cls.error(
-				message=exception.message,
-				error_types=exception.error_types,
-				**error_data,
-			)
+			error_data['error_types'] = exc.error_types
 
-		return cls.error(str(exception), **{'data': repr(exception)})
+			return Message(success=False, error=exc.message, error_data=error_data)
+
+		return Message(success=False, error=str(exc), error_data={'data': repr(exc)})
 
 	def _render_tags(self):
-		return []
+		tags = []
+
+		if self.success is not None:
+			tags.append(f'success={self.success}')
+
+		if self.error:
+			tags.append(f'error={self.error}')
+
+		return tags
 
 	def __str__(self):
 		tags = ' '.join(self._render_tags())

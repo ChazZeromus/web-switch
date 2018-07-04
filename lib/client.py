@@ -25,12 +25,12 @@ class Client:
 		self.logger.debug('Entering')
 		return self
 
-	async def __aexit__(self, *args, **kwargs) -> None:
+	async def __aexit__(self, exc_type, exc_value, traceback) -> None:
 		for convo in self.active_convos.values():
 			await convo.queue.put(Exception('Client terminating!'))
 			convo.cancel_expects()
 
-		await self.connection.__aexit__(*args, **kwargs)
+		await self.connection.__aexit__(exc_type, exc_value, traceback)
 		await self._loop_fut
 
 		self.logger.debug('Exiting')

@@ -1,8 +1,10 @@
 from asyncio import sleep as async_sleep
+import asyncio
+import pytest
 from typing import *
 
 from lib.router.errors import RouterError
-from lib.client import ResponseException, ResponseTimeoutException
+from lib.client import Client, ResponseException, ResponseTimeoutException
 from lib.channel_server import Conversation, add_action, ChannelClient
 
 from .common import *
@@ -96,19 +98,40 @@ async def test_unknown_action(client_with_server: Client):
 
 	assert excinfo.match('Invalid action')
 
+
+@pytest.mark.parametrize("count", [10, 5])
 @pytest.mark.asyncio
-async def test_enum(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+async def test_enum(count: int, get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
 	with get_server() as server:
-		async with get_client() as client1, get_client() as client2:
-			await async_sleep(0.1)
-			message = await client1.convo('enum_clients').send_and_expect({})
+		clients = []
 
-			data = message.data
+		for i in range(count):
+			clients.append(get_client())
 
-			assert isinstance(data, dict)
-			assert 'client_ids' in data
-			assert isinstance(data['client_ids'], list)
-			assert len(data['client_ids']) == 2
+		await asyncio.gather(*(c.__aenter__() for c in clients))
+
+		collected_ids = set()
+
+		for client in clients:
+			message = await client.convo('whoami').send_and_expect({})
+			assert 'id' in message.data
+			collected_ids.add(message.data['id'])
+
+		client1 = clients[0]
+
+		message = await client1.convo('enum_clients').send_and_expect({})
+
+		await asyncio.gather(*(c.__aexit__(None, None, None) for c in clients))
+
+		data = message.data
+
+		assert isinstance(data, dict)
+		assert 'client_ids' in data
+		assert isinstance(data['client_ids'], list)
+
+		enum_ids = set(data['client_ids'])
+
+		assert enum_ids == collected_ids
 
 
 # TODO: Test active source cancelling
