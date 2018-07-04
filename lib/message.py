@@ -107,3 +107,5 @@ class Message(object):
 
 		return json.dumps(payload, cls=MessageJSONEncoder)
 
+
+__all__ = ['Message']

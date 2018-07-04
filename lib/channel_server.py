@@ -122,6 +122,7 @@ class ChannelServer(Router):
 		super(ChannelServer, self).__init__(host, port, max_queue_size)
 		self.rooms: Dict[Tuple[str, str], Set[ChannelClient]] = {}
 		self.conn_to_client: Dict[Connection, ChannelClient] = {}
+		# TODO: Make ID-to-client mapping local to room
 		self.id_to_client: Dict[int, ChannelClient] = {}
 
 		self.host, self.port = host, port
@@ -355,3 +356,12 @@ def cli_main():
 
 if __name__ == '__main__':
 	cli_main()
+
+__all__ = [
+	'ChannelServerError',
+	'ChannelServerActionError',
+	'ChannelServerResponseError',
+	'ChannelClient',
+	'Conversation',
+	'ChannelServer',
+]

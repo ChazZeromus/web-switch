@@ -146,7 +146,11 @@ class ResponseDispatcher(object):
 	def __str__(self):
 		return repr(self)
 
-	def start(self):
+	def start(self) -> None:
+		"""
+		Start dispatch event loop. Will block until background event loop thread initializes.
+		This method must be called before ResponseDispatch can perform its duties.
+		"""
 		if self.loop_thread is None:
 			self.loop_thread = EventLoopThread()
 
@@ -154,7 +158,14 @@ class ResponseDispatcher(object):
 		self.loop_thread.start()
 		self.loop_thread.wait_result()
 
-	def stop(self, timeout: float = None):
+	def stop(self, timeout: float = None) -> None:
+		"""
+		Stop dispatch event loop and wait for pending actions and their AwaitResponses for a specified timeout.
+		If those actions and AwaitResponses are still waiting or executing when stop() times out, their futures
+		will be cancelled and stop() will return.
+		:param timeout:
+		:return:
+		"""
 		if not self.loop_thread:
 			raise DispatchNotStarted()
 
@@ -225,6 +236,12 @@ class ResponseDispatcher(object):
 		self.loop_thread = None
 
 	def _build_actions(self):
+		"""
+		Called when ResponseDispatcher is initialized: Enumerate every attribute of `self.instance` that
+		was decorated with add_action() and build the instance-local dispatch table for this ResponseDispatcher
+		instance.
+		:return:
+		"""
 		self.actions.clear()
 
 		# Go through each action-having method and clone it to this ResponseDispatcher
@@ -268,7 +285,14 @@ class ResponseDispatcher(object):
 
 			self.actions[action.name] = action
 
-	def _set_await_dispatch(self, source: object, key: Tuple[str, uuid.UUID], provider: 'AbstractAwaitDispatch'):
+	def _set_await_dispatch(self, source: object, key: Tuple[str, uuid.UUID], provider: 'AbstractAwaitDispatch') -> None:
+		"""
+		Prepares an AwaitDispatch object so that the action that created it can `await` its results. The AwaitDispatch's
+		future's result is set when a dispatch() occurs for that particular action response-id.
+		:param source: The source object of the AwaitResponse object.
+		:param key:  A tuple of action name and response GUID.
+		:param provider: The provider of the AwaitDispatch object
+		"""
 		with self._lock:
 			self._active_ads[key] = provider
 
@@ -508,11 +532,13 @@ class ResponseDispatcher(object):
 				async def coro_dispatch(dispatch_action: Action, dispatch_args) -> Any:
 					return await dispatch_action.func(dispatch_action.instance, **dispatch_args)
 
+				# Set async callback used to call async function
 				async_dispatch_callback = coro_dispatch
 			else:
 				async def call_dispatch(dispatch_action: Action, dispatch_args) -> Any:
 					return dispatch_action.func(dispatch_action.instance, **dispatch_args)
 
+				# Set async callback used to call non-async function
 				async_dispatch_callback = call_dispatch
 
 			# Co-routine to run regardless of synchronocity
@@ -859,3 +885,20 @@ class DispatchArgumentError(DispatchError):
 class DispatchMissingArgumentError(DispatchArgumentError):
 	def __init__(self, argument_name: str, *args, **kwargs) -> None:
 		super(DispatchMissingArgumentError, self).__init__(*args, **{**kwargs, 'argument_name': argument_name})
+
+
+__all__ = [
+	'ParameterSet',
+	'ResponseDispatcher',
+	'add_action',
+	'Action',
+	'AbstractAwaitDispatch',
+	'AwaitDispatch',
+	'DispatchError',
+	'DispatchNotStarted',
+	'DispatchAwaitTimeout',
+	'DispatchNotFound',
+	'DispatchStopping',
+	'DispatchArgumentError',
+	'DispatchMissingArgumentError',
+]

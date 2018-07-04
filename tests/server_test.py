@@ -3,7 +3,7 @@ import pytest
 from asyncio import sleep as async_sleep
 
 from .common import *
-from lib.channel_server import Conversation, add_action, ChannelClient
+from lib.channel_server import Conversation, add_action, ChannelClient, AwaitDispatch
 from lib.client import Client, ResponseException
 
 
@@ -29,6 +29,14 @@ class ServerTestingServer(ChannelServerBase):
 	@add_action()
 	async def action_raise_unique_error_async(self, client: 'ChannelClient', convo: Conversation):
 		raise UniqueError()
+
+	@add_action()
+	async def action_async_return(self, convo: Conversation, client: 'ChannelClient') -> dict:
+		return {'data': 'hello a little later!'}
+
+	@add_action()
+	def action_nonasync_return(self, client: 'ChannelClient') -> dict:
+		return {'data': 'hello right now!'}
 
 
 @pytest.fixture(scope='function')
@@ -128,3 +136,14 @@ async def test_server_timeout(client_with_server: Client):
 
 	assert excinfo.value.data.get('exc_class') == 'DispatchAwaitTimeout', 'Timeout server exception class'
 
+@pytest.mark.asyncio
+async def test_async_return(client_with_server: Client):
+	message = await client_with_server.convo('async_return').send_and_expect({})
+	assert 'data' in message.data
+	assert 'later' in message.data['data']
+
+@pytest.mark.asyncio
+async def test_nonasync_return(client_with_server: Client):
+	message = await client_with_server.convo('nonasync_return').send_and_expect({})
+	assert 'data' in message.data
+	assert 'now' in message.data['data']

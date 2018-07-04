@@ -139,11 +139,6 @@ class Connection(object):
 
 			if self.in_pool:
 				self.conn_list.remove(self)
-				# self.router.connections.remove(self)
-				#
-				# # Signal main thread that connection has been removed
-				# self.router.receive_queue.put((self, None))
-				# self.in_pool = False
 
 			try:
 				await self.ws.close(code=self.close_code, reason=self.close_reason)
@@ -170,3 +165,9 @@ class Connection(object):
 		self.logger.debug('Waiting closed')
 		await self._close_event.wait()
 		self.logger.debug('Close arrived')
+
+
+__all__ = [
+	'ConnectionList',
+	'Connection',
+]

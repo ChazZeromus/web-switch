@@ -211,3 +211,13 @@ class ResponseException(Exception):
 
 	def __str__(self):
 		return f'ResponseException: {self.message} {self.error_types}'
+
+
+__all__ = [
+	'Client',
+	'Convo',
+	'ReceiveException',
+	'ClientShutdownException',
+	'ResponseTimeoutException',
+	'ResponseException',
+]
