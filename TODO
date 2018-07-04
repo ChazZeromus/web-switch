@@ -198,3 +198,6 @@ X Queue                  123 Queue      567 Queue
 [msg: dff, guid: 123]---->[ ]
 [msg: bar, guid: 123]---->[ ]
 [msg: bah, guid: 567]------------------> [ ]
+
+A lot of tests seem to timeout when exceptions are thrown in the client, maybe we can make sure servers can close
+gracefully when this happens?

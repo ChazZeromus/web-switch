@@ -2,6 +2,8 @@ import asyncio
 import json
 import uuid
 import traceback
+import time
+import bisect
 from typing import *
 
 import websockets
@@ -13,36 +15,191 @@ from lib.logger import g_logger
 
 WHOAMI_WAIT = 2.0
 
+
+class TimestampedList(object):
+	def __init__(self):
+		self._list: List = []
+		self._ts_list: List[float] = []
+
+	def __delslice__(self, i, j):
+		del self._list[i:j]
+		del self._ts_list[i:j]
+
+	def __delitem__(self, index):
+		self._list.__delitem__(index)
+		self._ts_list.__delitem__(index)
+
+	def __iter__(self):
+		return iter(self._list)
+
+	def append(self, obj):
+		self._list.append(obj)
+		self._ts_list.append(time.monotonic())
+
+	def remove_old(self, max_age: float) -> int:
+		now = time.monotonic()
+		lookup = [now - x for x in reversed(self._ts_list)]
+
+		reverse_i = bisect.bisect_right(lookup, max_age)
+		i = len(self._list) - reverse_i
+
+		del self[:i]
+
+		return i
+
+	def get(self):
+		self._ts_list.pop(0)
+		return self._list.pop(0)
+
+	@property
+	def oldest_ts(self) -> Optional[float]:
+		if not self:
+			return None
+
+		return self._ts_list[0]
+
+	def __getitem__(self, item):
+		return self._list[item]
+
+	def __len__(self):
+		return len(self._list)
+
+	def __bool__(self):
+		return bool(self._list)
+
+	def get_list_copy(self) -> List:
+		return list(self._list)
+
+
+class MessageQueues(object):
+	def __init__(self, max_count: int, max_message_age: float = 10.0) -> None:
+		self._max: int = max_count
+		self._count: int = 0
+		self._queues: Dict[Optional[uuid.UUID], TimestampedList] = {}
+		self._max_age = max_message_age
+
+	@property
+	def count(self) -> int:
+		return self._count
+
+	def _remove_oldest_by_count(self, count: int):
+		left = count
+		while left > 0:
+			candidates = []
+
+			for guid, queue in self._queues.items():
+				if queue:
+					candidates.append((guid, queue))
+
+			candidates.sort(key=lambda x: x[1].oldest_ts)
+
+			slice_count = min(left, len(candidates))
+			left -= slice_count
+			self._count -= slice_count
+
+			for guid, queue in candidates[:slice_count]:
+				queue.get()
+				if not queue:
+					del self._queues[guid]
+
+	def remove_oldest(self, max_age: float):
+		for guid, queue in list(self._queues.items()):
+			self._count -= queue.remove_old(max_age)
+
+			if not queue:
+				del self._queues[queue]
+
+	def add(self, guid: Optional[uuid.UUID], message: Message):
+		if self._count + 1 > self._max:
+			self._remove_oldest_by_count(self._count - self._max + 1)
+
+		queue = self._queues.get(guid)
+
+		if queue is None:
+			self._queues[guid] = queue = TimestampedList()
+
+		queue.append(message)
+
+		self._count += 1
+
+	def get(self, guid: Optional[uuid.UUID]) -> Optional[Message]:
+		queue = self._queues.get(guid)
+
+		if queue is None:
+			return None
+
+		msg: Message = queue.get()
+
+		self._count -= 1
+
+		if not queue:
+			del self._queues[guid]
+
+		return msg
+
+	def get_messages(self, guid: Optional[uuid.UUID]) -> Optional[List]:
+		if guid not in self._queues:
+			return None
+
+		return self._queues[guid].get_list_copy()
+
+	def get_guids(self) -> List[uuid.UUID]:
+		return list(self._queues.keys())
+
+
+
 class Client:
-	def __init__(self, ws_url):
-		self.connection: WebSocketConnection = websockets.connect(ws_url)
-		# self.ctx: Optional[WebSocketClientProtocol] = None
-		self.ctx = None
-		self.client_id: Optional[int] = None
-		self.active_convos: Dict[uuid.UUID, Convo] = {}
-		self.logger = g_logger.getChild('Client')
+	last_instance_id = 0
+
+	def __init__(self, ws_url: str, max_queued_messages: int = 1000) -> None:
+		self._url = ws_url
+		self._connection: WebSocketConnection = websockets.connect(ws_url)
+		# self._ctx: Optional[WebSocketClientProtocol] = None
+		self._ctx = None
+
+		Client.last_instance_id += 1
+		self._id: int = Client.last_instance_id
+
+		self._client_id: Optional[int] = None
+
+		self._active_convos: Dict[uuid.UUID, Convo] = {}
+		self._logger = g_logger.getChild('Client')
 		self._loop_fut = None
 
+		self._queues: MessageQueues = MessageQueues(max_queued_messages)
+
+	@property
+	def id(self) -> int:
+		return self._id
+
+	@property
+	def client_id(self) -> Optional[int]:
+		return self._client_id
+
+	@property
+	def url(self) -> str:
+		return self._url
+
 	async def __aenter__(self, *args, **kwargs) -> 'Client':
-		self.ctx = await self.connection.__aenter__(*args, **kwargs)
+		self._ctx = await self._connection.__aenter__(*args, **kwargs)
 		self._loop_fut = asyncio.ensure_future(self._recv_loop())
-		self.logger.debug('Entering')
+		self._logger.debug('Entering')
 
 		message = await self.convo('whoami').send_and_expect({}, WHOAMI_WAIT)
 
-		self.client_id = message.data['id']
+		self._client_id = int(message.data['id'])
 
 		return self
 
 	async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-		for convo in self.active_convos.values():
+		for convo in self._active_convos.values():
 			await convo.queue.put(Exception('Client terminating!'))
 			convo.cancel_expects()
 
-		await self.connection.__aexit__(exc_type, exc_value, traceback)
+		await self._connection.__aexit__(exc_type, exc_value, traceback)
 		await self._loop_fut
 
-		self.logger.debug('Exiting')
+		self._logger.debug('Exiting')
 
 	@staticmethod
 	def _extract_guid(message: Message) -> Optional[uuid.UUID]:
@@ -57,7 +214,7 @@ class Client:
 		return uuid.UUID(response_id)
 
 	async def _recv_loop(self):
-		async for response in self.ctx:
+		async for response in self._ctx:
 			try:
 				data: Dict = json.loads(response)
 
@@ -67,7 +224,7 @@ class Client:
 				error = data.get('error')
 
 				guid = self._extract_guid(message)
-				convo = self.active_convos.get(guid)
+				convo = self._active_convos.get(guid)
 
 				if error:
 					error_data = message.error_data
@@ -81,27 +238,30 @@ class Client:
 
 				if convo:
 					await convo.queue.put(message)
-					self.logger.debug(f'Posted {message!r}')
+					self._logger.debug(f'Posted {message!r}')
 
 				elif guid is not None:
-					self.logger.warning(f'Got response for non-existent conversation {guid}')
-
+					self._logger.info(f'Got response for non-existent conversation {guid!r}, queuing')
+					await self._queues.add(guid, message)
 				else:
-					self.logger.warning(f'No response ID provided in body: {data!r}')
+					self._logger.warning(f'No response ID provided in body: {data!r}')
 
 			except ReceiveException as e:
-				self.logger.warning(f'Received error: {e!r}')
+				self._logger.warning(f'Received error: {e!r}')
 			except Exception as e:
-				self.logger.error(f'{traceback.format_exc()}\nError handling response: {e!r}')
+				self._logger.error(f'{traceback.format_exc()}\nError handling response: {e!r}')
+
+	def get_message(self, guid: Optional[uuid.UUID]) -> Optional[Message]:
+		return self._queues.get(guid)
 
 	# TODO: Create a status method that returns a Convo as an async context-manager as a shorthand
 	def convo(self, action: str):
-		if self.ctx is None:
+		if self._ctx is None:
 			raise Exception('No context is available to creating convo')
 
 		new_convo = Convo(action, self)
 
-		self.active_convos[new_convo.guid] = new_convo
+		self._active_convos[new_convo._guid] = new_convo
 
 		return new_convo
 
@@ -115,25 +275,38 @@ class _ActiveItem(NamedTuple):
 class Convo:
 	last_convo_id = 0
 
-	def __init__(self, action: str, client: Client) -> None:
-		self.client = client
-		self.action = action
-
-		if not client.ctx or not client.client_id:
+	def __init__(self, action: Optional[str], client: Client) -> None:
+		if not client._ctx:
 			raise NoContextException()
 
-		self.ctx: WebSocketClientProtocol = client.ctx
-		self.guid = uuid.uuid4()
+		self._client = client
+		self._action = action
 
-		self.client_id: int = client.client_id
+		self._ctx: WebSocketClientProtocol = client._ctx
+
+		self._guid: Optional[uuid.UUID] = uuid.uuid4() if self._action else None
+
+		self.client_id: int = client._id
 
 		self.queue: asyncio.Queue = asyncio.Queue()
 
 		Convo.last_convo_id += 1
-		self.id = Convo.last_convo_id
-		self.logger = self.client.logger.getChild(f'convo:{self.action}:{self.id}')
+		self._id = Convo.last_convo_id
+		self._logger = self._client._logger.getChild(f'convo:{self._action!r}:{self._id}')
 
 		self._active_expects: Set[_ActiveItem] = set()
+
+	@property
+	def id(self) -> int:
+		return self._id
+
+	@property
+	def guid(self) -> Optional[uuid.UUID]:
+		return self._guid
+
+	@property
+	def action(self) -> Optional[str]:
+		return self._action
 
 	def cancel_expects(self):
 		for active_item in list(self._active_expects):
@@ -145,8 +318,11 @@ class Convo:
 			self._active_expects.remove(active_item)
 
 	async def send(self, data: Union[dict, Message]):
-		if not self.ctx:
+		if not self._ctx:
 			raise NoContextException()
+
+		if not self._action or not self._guid:
+			raise UnrequitedException('Cannot call send()')
 
 		if isinstance(data, dict):
 			message = Message(data=data)
@@ -155,48 +331,55 @@ class Convo:
 		else:
 			raise TypeError('data must be dict or Message')
 
-		self.logger.debug(f'Sending {message!r}')
+		self._logger.debug(f'Sending {message!r}')
 
-		await self.ctx.send(message.json(action=self.action, response_id=str(self.guid)))
+		await self._ctx.send(message.json(action=self._action, response_id=str(self._guid)))
 
 	async def expect_forever(self) -> Message:
 		return await self.expect(None)
 
 	async def expect(self, timeout: Optional[float]) -> Message:
-		self.logger.debug(f'Waiting {timeout if timeout else "indefinitely"} seconds for response')
+		self._logger.debug(f'Waiting {timeout if timeout else "indefinitely"} seconds for response')
 
-		active_item: Optional[_ActiveItem] = None
+		# First check client for new messages
 
-		async def timeout_callback():
-			await asyncio.sleep(timeout)
-			self.logger.warning('Timed out waiting for response')
-			active_item.retrieve_future.cancel()
-			active_item.data_future.set_exception(ResponseTimeoutException(f'send_and_expect timeout out after {timeout}'))
-			self._active_expects.remove(active_item)
+		response_data = self._client.get_message(self._guid)
 
-		async def await_data():
-			new_data = await self.queue.get()
+		if response_data is None:
+			active_item: Optional[_ActiveItem] = None
 
-			if active_item.timeout_future:
-				active_item.timeout_future.cancel()
+			async def timeout_callback():
+				await asyncio.sleep(timeout)
+				self._logger.warning('Timed out waiting for response')
+				active_item.retrieve_future.cancel()
+				active_item.data_future.set_exception(ResponseTimeoutException(f'send_and_expect timeout out after {timeout}'))
+				self._active_expects.remove(active_item)
 
-			self._active_expects.remove(active_item)
-			active_item.data_future.set_result(new_data)
+			async def await_data():
+				new_data = await self.queue.get()
 
-		active_item = _ActiveItem(
-			data_future=asyncio.get_event_loop().create_future(),
-			timeout_future=asyncio.ensure_future(timeout_callback()) if timeout else None,
-			retrieve_future=asyncio.ensure_future(await_data()),
-		)
+				if active_item.timeout_future:
+					active_item.timeout_future.cancel()
 
-		self._active_expects.add(active_item)
+				self._active_expects.remove(active_item)
+				active_item.data_future.set_result(new_data)
 
-		response_data = await active_item.data_future
+			active_item = _ActiveItem(
+				data_future=asyncio.get_event_loop().create_future(),
+				timeout_future=asyncio.ensure_future(timeout_callback()) if timeout else None,
+				retrieve_future=asyncio.ensure_future(await_data()),
+			)
+
+			self._active_expects.add(active_item)
+
+			response_data = await active_item.data_future
 
 		if isinstance(response_data, BaseException):
 			raise response_data
 
 		return response_data
+
+	# TODO: Implement __aiter__ for continuous messages
 
 	async def send_and_expect(self, data: Union[dict, Message], timeout: float=10.0) -> Message:
 		await self.send(data)
@@ -213,6 +396,11 @@ class ReceiveException(ClientException):
 
 class NoContextException(ClientException):
 	pass
+
+
+class UnrequitedException(ClientException):
+	def __init__(self, msg):
+		super(UnrequitedException, self).__init__(f'Cannot send a message to server on an actionless conversation: {msg}')
 
 
 class ResponseTimeoutException(ReceiveException):
