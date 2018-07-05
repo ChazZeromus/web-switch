@@ -181,6 +181,7 @@ class ChannelServer(Router):
 			client.conns.append(connection)
 		else:
 			client = ChannelClient(self, connection)
+			self.id_to_client[client.id] = client
 			room.add(client)
 			client.set_room_key(key)
 
@@ -200,6 +201,7 @@ class ChannelServer(Router):
 		if not client.conns:
 			room = self.rooms[client.get_room_key()]
 			room.remove(client)
+			del self.id_to_client[client.id]
 			self.logger.info(f'Removed last connection of {client!r}, removed client')
 
 	def on_start(self):
@@ -328,7 +330,7 @@ class ChannelServer(Router):
 
 			target_clients.append(client_)
 
-		message = Message(data)
+		message = Message({**data, 'sender_id': client.id})
 
 		for client_ in target_clients:
 			client_.try_send(message, response_id=None)

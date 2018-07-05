@@ -255,7 +255,7 @@ class Client:
 		return self._queues.get(guid)
 
 	# TODO: Create a status method that returns a Convo as an async context-manager as a shorthand
-	def convo(self, action: str):
+	def convo(self, action: Optional[str]):
 		if self._ctx is None:
 			raise Exception('No context is available to creating convo')
 

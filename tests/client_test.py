@@ -137,14 +137,20 @@ async def test_enum(count: int, get_client: Callable[[], Client], get_server: Ca
 
 		assert enum_ids == collected_ids
 
-# @pytest.mark.asyncio
-# async def test_send(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
-# 	with get_server():
-# 		async with get_client() as client1, get_client() as client2:
-# 			await client1.convo('send').send({
-# 				'targets': [client2.client_id],
-# 				'data': {'msg': 'yo'}
-# 			})
+
+@pytest.mark.asyncio
+async def test_send(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+	with get_server():
+		async with get_client() as client1, get_client() as client2:
+			await client1.convo('send').send({
+				'targets': [client2.client_id],
+				'data': {'msg': 'yo'}
+			})
+
+			response = await client2.convo(None).expect(2.0)
+
+			assert response.data.get('msg') == 'yo'
+			assert response.data.get('sender_id') == client1.client_id
 
 
 def test_message_queue():
