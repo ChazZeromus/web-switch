@@ -1,18 +1,8 @@
-const WebSocket = require('ws');
-const _ = require('lodash');
-const EventEmitter = require('events');
+import WebSocket from 'ws';
+import _ from 'lodash';
+import EventEmitter from 'events';
 
-const URL = 'ws://localhost:8765';
-
-const create = url => {
-    let ws = new WebSocket(url);
-
-    ws.onmessage = console.log;
-
-    return ws;
-};
-
-class Client extends EventEmitter {
+export default class Client extends EventEmitter {
     constructor(url) {
         super();
 
@@ -35,7 +25,7 @@ class Client extends EventEmitter {
     }
 
     handleClose(data) {
-        console.info('Connection Socket closed', data);
+        // console.info('Connection Socket closed', data);
         this.emit('close', data);
     }
 
@@ -135,14 +125,3 @@ class Client extends EventEmitter {
         return this.ws.close();
     }
 }
-
-async function foo() {
-    const client = new Client(URL + '/somechannel/someroom/');
-    await client.send({message: 'hello!'});
-    await client.waitForReply(true);
-    await client.close();
-}
-
-foo().catch(data => console.error('whoops', data));
-
-
