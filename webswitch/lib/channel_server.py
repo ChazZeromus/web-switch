@@ -3,7 +3,9 @@ from typing import *
 import traceback
 import uuid
 import argparse
+from logging import DEBUG
 
+from .logger import g_logger
 from .dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
 from .router.errors import RouterError, RouterResponseError, RouterConnectionError
 from .router.connection import Connection
@@ -369,6 +371,7 @@ def cli_main():
 	args = parser.parse_args()
 
 	logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')
+	g_logger.setLevel(DEBUG)
 
 	router = ChannelServer(args.host, args.port)
 	router.serve(daemon=False)
