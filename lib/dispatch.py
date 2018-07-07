@@ -57,6 +57,14 @@ class ActiveAction(object):
 
 		return self.provider.get_await_dispatch().get_current_future()
 
+	def cancel_all(self):
+		future = self.get_ad_future()
+		if future:
+			future.cancel()
+
+		if self.action_future:
+			self.action_future.cancel()
+
 
 # TODO: For coroutine actions, perhaps implement a sort of session heartbeat for possible
 # TODO: long periods of waiting?
@@ -251,18 +259,25 @@ class ResponseDispatcher(object):
 			self.logger.warning(f'Cancelling {len(self._actives)} active dispatches and their AwaitDispatches')
 
 			for active in self._actives:
-				future = active.get_ad_future()
-				if future:
-					future.cancel()
-
-				future = active.action_future
-				if future:
-					future.cancel()
+				active.cancel_all()
 
 		self.logger.debug('Shutting down loop thread, and joining thread')
 		self.loop_thread.shutdown_loop()
 		self.loop_thread.join()
 		self.loop_thread = None
+
+	def cancel_action_by_source(self, source: object) -> None:
+		active_actions = self._actives.lookup(source=source)
+		self.logger.info(f'Request for cancelling {len(active_actions)} active actions for source {source!r}')
+
+		if not active_actions:
+			return
+
+		def callback():
+			for active in active_actions:
+				active.cancel_all()
+
+		self.loop_thread.call_soon_threadsafe(callback)
 
 	def _build_actions(self):
 		"""

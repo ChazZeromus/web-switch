@@ -285,6 +285,8 @@ class Router(object):
 			async for message in websocket:
 				self.receive_queue.put((connection, message))
 
+			self.__logger.info(f'WebSocket loop for {connection!r} completed')
+
 		except ConnectionClosed as e:
 			self.__logger.warning(f'Connection {connection!r} closed unexpectedly (code: {e.code!r}, reason: {e.reason!r})')
 

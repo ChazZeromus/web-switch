@@ -1,5 +1,6 @@
 import fnmatch
 import socket
+import time
 from contextlib import closing
 from typing import *
 
@@ -75,6 +76,38 @@ def get_client(free_port):
 	return func
 
 
+class TimeBox(object):
+	def __init__(self, window: float, slack: float = 0.01):
+		self._timelimit = window
+		self._slack = slack
+		self._start: Optional[float] = None
+		self._elapsed: Optional[float] = None
+
+	@property
+	def timelimit(self) -> float:
+		return self._timelimit
+
+	@property
+	def elapsed(self) -> Optional[float]:
+		return self._elapsed
+
+	@property
+	def within_timelimit(self):
+		assert self._elapsed is not None
+		return self._elapsed < self._timelimit - self._slack
+
+	def __enter__(self) -> 'TimeBox':
+		self._start = time.monotonic()
+		return self
+
+	def __exit__(self, exc_type, exc_val, exc_tb):
+		assert self._start is not None
+		self._elapsed = time.monotonic() - self._start
+
+		assert self.within_timelimit, f'Operation did not complete with timebox of {self._timelimit} seconds'
+
+
+
 __all__ = [
 	'get_client',
 	'free_port',
@@ -82,6 +115,7 @@ __all__ = [
 	'filter_records',
 	'client_with_server',
 	'ChannelServerBase',
+	'TimeBox',
 	'HOSTNAME',
 	'PORT',
 ]

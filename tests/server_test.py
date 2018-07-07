@@ -73,8 +73,12 @@ async def test_response_dispatch_timeout(get_server, get_client, caplog):
 
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Stop requested with *')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern=f'Waiting {wait_time} seconds *')
-	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Took too long to finish*')
-	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
+	# We can't assert these anymore because client d/cs will actually cancel active actions. Which is good. But
+	# in order to actually not stop an active action upon disconnect, you could have multiple connections to one client.
+	# TODO: Make another test like this one whenever multiple connections-per-client is implemented so we can actually
+	# TODO: Test the timeout properly
+	# assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Took too long to finish*')
+	# assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
 
 
 @pytest.mark.asyncio
@@ -152,3 +156,22 @@ async def test_nonasync_return(client_with_server: Client):
 	message = await client_with_server.convo('nonasync_return').send_and_expect({})
 	assert 'data' in message.data
 	assert 'now' in message.data['data']
+
+@pytest.mark.asyncio
+async def test_client_error(get_server, get_client):
+	# When client disconnects due to an exception like an error sent to it from the server and the in-flight action
+	# is expecting a response, that action needs to immediately cancel.
+	server: ServerTestingServer = get_server()
+
+	server.serve(daemon=True)
+
+	with pytest.raises(ResponseException) as excinfo:
+		async with get_client() as client:
+			response = await client.convo('send_error_and_continue').send_and_expect({}, 2)
+
+	assert excinfo.value.message == 'some error'
+
+	with TimeBox(2) as window:
+		server.stop_serve(window.timelimit)
+
+
