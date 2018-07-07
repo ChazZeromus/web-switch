@@ -8,9 +8,9 @@ import itertools, functools
 from copy import deepcopy
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
-from lib.event_loop import EventLoopThread
-from lib.index_map import IndexMap
-from lib.logger import g_logger
+from .event_loop import EventLoopThread
+from .index_map import IndexMap
+from .logger import g_logger
 
 
 # TODO: In the case where an instance of the user sends a dispatch way too early and already receives a response

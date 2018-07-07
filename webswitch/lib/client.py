@@ -11,8 +11,8 @@ import websockets
 from websockets.client import Connect as WebSocketConnection
 from websockets.client import WebSocketClientProtocol
 
-from lib.message import Message
-from lib.logger import g_logger
+from .message import Message
+from .logger import g_logger
 
 WHOAMI_WAIT = 2.0
 

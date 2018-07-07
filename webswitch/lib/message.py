@@ -3,7 +3,7 @@ import uuid
 from copy import deepcopy
 from typing import *
 
-from lib.router.errors import RouterError
+from .router.errors import RouterError
 
 
 class MessageJSONEncoder(json.JSONEncoder):

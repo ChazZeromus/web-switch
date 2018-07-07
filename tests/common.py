@@ -6,8 +6,8 @@ from typing import *
 
 import pytest
 
-from lib.client import Client
-from lib.channel_server import ChannelServer
+from webswitch.lib.client import Client
+from webswitch.lib.channel_server import ChannelServer
 
 HOSTNAME: str = '127.0.0.1'
 PORT: Optional[int] = None  # None for auto-select

@@ -1,6 +1,6 @@
 import logging
 from logging.handlers import SocketHandler
-from lib.logger import g_logger
+from webswitch.lib.logger import g_logger
 from .common import TimeBox
 
 logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')

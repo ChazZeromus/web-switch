@@ -6,7 +6,7 @@ from typing import Optional, List
 import websockets
 from websockets import WebSocketServerProtocol
 
-from lib.logger import g_logger
+from ..logger import g_logger
 
 
 class ConnectionList:

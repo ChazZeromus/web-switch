@@ -6,7 +6,8 @@ from typing import *
 from queue import Queue as thread_Queue
 from multiprocessing import Queue as mp_Queue
 import concurrent.futures as futures
-from lib.logger import g_logger
+
+from .logger import g_logger
 
 
 class EventLoopThread(threading.Thread):

@@ -13,11 +13,11 @@ from typing import *
 from websockets.server import WebSocketServerProtocol
 from websockets.exceptions import ConnectionClosed
 
-from lib.event_loop import EventLoopThread
-from lib.message import Message
-from lib.router.connection import Connection, ConnectionList
-from lib.router.errors import RouterError, RouterConnectionError, RouterServerError
-from lib.logger import g_logger
+from .connection import Connection, ConnectionList
+from .errors import RouterError, RouterConnectionError, RouterServerError
+from ..event_loop import EventLoopThread
+from ..message import Message
+from ..logger import g_logger
 
 
 def _route_thread(

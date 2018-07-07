@@ -3,8 +3,8 @@ import pytest
 from asyncio import sleep as async_sleep
 
 from .common import *
-from lib.channel_server import Conversation, add_action, ChannelClient, AwaitDispatch
-from lib.client import Client, ResponseException
+from webswitch.lib.channel_server import Conversation, add_action, ChannelClient, AwaitDispatch
+from webswitch.lib.client import Client, ResponseException
 
 
 class UniqueError(Exception):

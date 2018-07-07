@@ -4,11 +4,11 @@ import traceback
 import uuid
 import argparse
 
-from lib.dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
-from lib.router.errors import RouterError, RouterResponseError, RouterConnectionError
-from lib.router.connection import Connection
-from lib.router.router import Router
-from lib.message import Message
+from .dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
+from .router.errors import RouterError, RouterResponseError, RouterConnectionError
+from .router.connection import Connection
+from .router.router import Router
+from .message import Message
 
 import logging
 

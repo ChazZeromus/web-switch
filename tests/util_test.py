@@ -3,9 +3,9 @@ import time
 import uuid
 from typing import NamedTuple
 
-from lib.client import MessageQueues
-from lib.index_map import IndexMap
-from lib.message import Message
+from webswitch.lib.client import MessageQueues
+from webswitch.lib.index_map import IndexMap
+from webswitch.lib.message import Message
 
 
 def test_message_queue():
