@@ -77,7 +77,7 @@ def get_client(free_port):
 
 
 class TimeBox(object):
-	def __init__(self, window: float, slack: float = 0.01):
+	def __init__(self, window: float, slack: float = 0.01) -> None:
 		self._timelimit = window
 		self._slack = slack
 		self._start: Optional[float] = None

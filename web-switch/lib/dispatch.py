@@ -46,7 +46,7 @@ class ActiveAction(object):
 		action: 'Action',
 		provider: Optional['AbstractAwaitDispatch'] = None,
 		action_future: Optional[asyncio.Future] = None,
-	):
+	) -> None:
 		self.action: 'Action' = action
 		self.provider: Optional['AbstractAwaitDispatch'] = provider
 		self.action_future: Optional[asyncio.Future] = action_future
@@ -267,6 +267,9 @@ class ResponseDispatcher(object):
 		self.loop_thread = None
 
 	def cancel_action_by_source(self, source: object) -> None:
+		if not self.loop_thread:
+			raise DispatchNotStarted()
+
 		active_actions = self._actives.lookup(source=source)
 		self.logger.info(f'Request for cancelling {len(active_actions)} active actions for source {source!r}')
 

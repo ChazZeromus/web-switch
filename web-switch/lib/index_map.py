@@ -59,7 +59,7 @@ class IndexMap(Generic[T]):
 		result: Optional[Set[T]] = None
 
 		if not kwargs:
-			return result
+			return set()
 
 		for index_name, key in kwargs.items():
 			index = self._indexes.get(index_name)
@@ -101,7 +101,7 @@ class IndexMap(Generic[T]):
 
 		return list(results)[0]
 
-	def __iter__(self) -> Iterable[T]:
+	def __iter__(self) -> Iterator[T]:
 		return iter(list(self._items))
 
 
