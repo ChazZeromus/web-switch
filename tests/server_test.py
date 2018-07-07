@@ -38,6 +38,11 @@ class ServerTestingServer(ChannelServerBase):
 	def action_nonasync_return(self, client: 'ChannelClient') -> dict:
 		return {'data': 'hello right now!'}
 
+	@add_action()
+	async def action_send_error_and_continue(self, convo: Conversation, client: 'ChannelClient'):
+		response = await convo.send_and_recv({'error': 'some error', 'msg': 'give me nothing'})
+		raise Exception('Not suppose to receive a response!')
+
 
 @pytest.fixture(scope='function')
 def get_server(free_port):
@@ -69,7 +74,7 @@ async def test_response_dispatch_timeout(get_server, get_client, caplog):
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Stop requested with *')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern=f'Waiting {wait_time} seconds *')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Took too long to finish*')
-	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * actions')
+	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
 
 
 @pytest.mark.asyncio

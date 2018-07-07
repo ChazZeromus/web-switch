@@ -38,11 +38,6 @@ def _route_thread(
 
 		assert isinstance(conn, Connection)
 
-		# Empty data is a close request
-		if data is None:
-			remove_callback(conn)
-			continue
-
 		if conn.closed:
 			logger.warning(f'Dropping message since conn {conn!r} is closing: {data!r}')
 			continue
@@ -111,6 +106,7 @@ class Router(object):
 		server is ready. This solves issues where immediately connecting to this server after this call
 		can fail.
 		"""
+		self.__logger.info('Start signaled')
 		self._ready_event.clear()
 		self._server_thread.start()
 
@@ -126,13 +122,17 @@ class Router(object):
 
 			self.stop_serve()
 
+		self.__logger.info('Start completed')
+
 	def stop_serve(self):
 		"""
 		Signal the termination of the websocket server and block until the background thread finishes.
 		:return:
 		"""
+		self.__logger.info('Stop signaled')
 		self._interrupt_event.set()
 		self._server_thread.join()
+		self.__logger.info('Stop completed')
 
 	def _serve_forever(self):
 		self._interrupt_event.clear()
@@ -196,7 +196,6 @@ class Router(object):
 
 		# Close all connections and wait so remove handlers have had a chance to run
 		self.connection_list.close(reason='Server shutting down')
-		# self.receive_queue.put((conn, None))
 
 		# Don't post main-thread destruction yet as there could still be some connections
 		# that haven't been closed and removed from the connections list yet.
@@ -291,6 +290,8 @@ class Router(object):
 
 		connection.close()
 		await connection.wait_closed()
+
+		self.on_remove(connection)
 
 		self.__logger.debug(f'Connection coroutine ended for {connection}')
 

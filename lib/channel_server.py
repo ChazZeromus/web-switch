@@ -98,9 +98,9 @@ class Conversation(AbstractAwaitDispatch):
 	async def send(self, data: Dict):
 		await self.client.send(Message(data=data), self.await_dispatch.guid)
 
-	async def send_and_recv(self, data: Dict, params: Dict[str, Type] = None, timeout: float = None):
+	async def send_and_recv(self, data: Dict, expect_params: Dict[str, Type] = None, timeout: float = None):
 		await self.send(data)
-		return await self(params=params, timeout=timeout)
+		return await self(params=expect_params, timeout=timeout)
 
 
 class ChannelServer(Router):
@@ -202,6 +202,7 @@ class ChannelServer(Router):
 			room = self.rooms[client.get_room_key()]
 			room.remove(client)
 			del self.id_to_client[client.id]
+
 			self.logger.info(f'Removed last connection of {client!r}, removed client')
 
 	def on_start(self):

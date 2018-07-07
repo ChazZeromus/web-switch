@@ -201,3 +201,5 @@ X Queue                  123 Queue      567 Queue
 
 A lot of tests seem to timeout when exceptions are thrown in the client, maybe we can make sure servers can close
 gracefully when this happens?
+    Well this can happen if servers wait indefinitely for a response and clients already crash. Maybe when the clients
+    crash they can disconnect and cause the action to stop?

@@ -4,6 +4,7 @@ import uuid
 import traceback
 import time
 import bisect
+from logging import Logger
 from typing import *
 
 import websockets
@@ -107,7 +108,7 @@ class MessageQueues(object):
 			self._count -= queue.remove_old(max_age)
 
 			if not queue:
-				del self._queues[queue]
+				del self._queues[guid]
 
 	def add(self, guid: Optional[uuid.UUID], message: Message):
 		if self._count + 1 > self._max:
@@ -143,7 +144,7 @@ class MessageQueues(object):
 
 		return self._queues[guid].get_list_copy()
 
-	def get_guids(self) -> List[uuid.UUID]:
+	def get_guids(self) -> List[Optional[uuid.UUID]]:
 		return list(self._queues.keys())
 
 
@@ -163,8 +164,8 @@ class Client:
 		self._client_id: Optional[int] = None
 
 		self._active_convos: Dict[uuid.UUID, Convo] = {}
-		self._logger = g_logger.getChild('Client')
-		self._loop_fut = None
+		self._logger: Logger = g_logger.getChild('Client')
+		self._loop_fut: Optional[asyncio.Future] = None
 
 		self._queues: MessageQueues = MessageQueues(max_queued_messages)
 
@@ -192,6 +193,9 @@ class Client:
 		return self
 
 	async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+		if not self._loop_fut:
+			raise Exception('Cannot async-exit when client never entered')
+
 		for convo in self._active_convos.values():
 			await convo.queue.put(Exception('Client terminating!'))
 			convo.cancel_expects()
@@ -227,7 +231,7 @@ class Client:
 				convo = self._active_convos.get(guid)
 
 				if error:
-					error_data = message.error_data
+					error_data = message.error_data or {}
 
 					exc = ResponseException(error, **error_data)
 
@@ -273,14 +277,14 @@ class _ActiveItem(NamedTuple):
 
 
 class Convo:
-	last_convo_id = 0
+	last_convo_id: int = 0
 
 	def __init__(self, action: Optional[str], client: Client) -> None:
 		if not client._ctx:
 			raise NoContextException()
 
-		self._client = client
-		self._action = action
+		self._client: Client = client
+		self._action: Optional[str] = action
 
 		self._ctx: WebSocketClientProtocol = client._ctx
 
@@ -291,8 +295,8 @@ class Convo:
 		self.queue: asyncio.Queue = asyncio.Queue()
 
 		Convo.last_convo_id += 1
-		self._id = Convo.last_convo_id
-		self._logger = self._client._logger.getChild(f'convo:{self._action!r}:{self._id}')
+		self._id: int = Convo.last_convo_id
+		self._logger: Logger = self._client._logger.getChild(f'convo:{self._action!r}:{self._id}')
 
 		self._active_expects: Set[_ActiveItem] = set()
 
@@ -373,6 +377,8 @@ class Convo:
 			self._active_expects.add(active_item)
 
 			response_data = await active_item.data_future
+
+		assert response_data is not None
 
 		if isinstance(response_data, BaseException):
 			raise response_data

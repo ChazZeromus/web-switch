@@ -9,6 +9,7 @@ from copy import deepcopy
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
 from lib.event_loop import EventLoopThread
+from lib.index_map import IndexMap
 from lib.logger import g_logger
 
 
@@ -38,7 +39,25 @@ class ParameterSet(NamedTuple):
 			)
 		return super(other)
 
-# TODO: When sending errors, provide the response_id if possible
+
+class ActiveAction(object):
+	def __init__(
+		self,
+		action: 'Action',
+		provider: Optional['AbstractAwaitDispatch'] = None,
+		action_future: Optional[asyncio.Future] = None,
+	):
+		self.action: 'Action' = action
+		self.provider: Optional['AbstractAwaitDispatch'] = provider
+		self.action_future: Optional[asyncio.Future] = action_future
+
+	def get_ad_future(self) -> Optional[asyncio.Future]:
+		if not self.provider:
+			return None
+
+		return self.provider.get_await_dispatch().get_current_future()
+
+
 # TODO: For coroutine actions, perhaps implement a sort of session heartbeat for possible
 # TODO: long periods of waiting?
 
@@ -119,9 +138,8 @@ class ResponseDispatcher(object):
 
 		self.loop_thread: Optional[EventLoopThread] = None
 
-		self._active_ads: Dict[Tuple[str, uuid.UUID], 'AbstractAwaitDispatch'] = {}
-		self._active_ads_per_source: Dict[Tuple[str, object], 'AbstractAwaitDispatch'] = {}
-		self._active_dispatches: Set[asyncio.Future] = set()
+		self._actives: IndexMap[ActiveAction] = IndexMap('guid', 'source', 'action')
+
 		self._lock = Lock()
 
 		self._stopping = False
@@ -173,29 +191,39 @@ class ResponseDispatcher(object):
 			self.logger.warning('Stop dispatcher already requested')
 			return
 
+		# TODO: This might be needed because of the done callbacks being called by scheduling onto the event loop
+		# TODO: Maybe try to test for cases where stop() could be called sooner than done callbacks can finish?
+		# timeout = timeout or 0.1
+
 		self.logger.debug(f'Stop dispatcher requested with timeout of {timeout}')
 		self._stopping = True
 
 		# Cancel any awaiting dispatches
-		pending_awaits = []
+		pending_awaits: List[asyncio.Future] = []
+		active_dispatches: List[asyncio.Future] = []
 
-		for provider in self._active_ads.values():
-			future = provider.get_await_dispatch().get_current_future()
+		for active in self._actives:
+			future = active.get_ad_future()
+
 			if future:
 				pending_awaits.append(future)
 
-			self.logger.info(
-				f'Stop requested with {len(pending_awaits)} awaits and {len(self._active_dispatches)} actions'
-				f' still active.'
-			)
+			action_future = active.action_future
+			if action_future:
+				active_dispatches.append(action_future)
 
-		if pending_awaits or self._active_dispatches:
+		self.logger.info(
+			f'Stop requested with {len(pending_awaits)} awaits and {len(active_dispatches)} actions'
+			f' still active.'
+		)
+
+		if pending_awaits or active_dispatches:
 			if timeout is None or timeout > 0:
 				self.logger.info(f'Waiting {timeout} seconds for AwaitDispatches and actions to finish')
 
 				async def gather():
 					await asyncio.gather(
-						*itertools.chain(pending_awaits, self._active_dispatches),
+						*itertools.chain(pending_awaits, active_dispatches),
 						loop=self.loop_thread.event_loop,
 						return_exceptions=True,
 					)
@@ -209,10 +237,9 @@ class ResponseDispatcher(object):
 
 				if result.done():
 					self.logger.debug('All AwaitDispatches finished')
-					pending_awaits.clear()
 
-					if self._active_dispatches:
-						self.logger.warning(f'Waited for all actions but {len(self._active_dispatches)} remain')
+					if self._actives:
+						self.logger.warning(f'Waited for all actions but {len(self._actives)} remain')
 					else:
 						self.logger.info('All active dispatch actions finished')
 		else:
@@ -220,15 +247,17 @@ class ResponseDispatcher(object):
 
 		self._stopped = True
 
-		if pending_awaits:
-			self.logger.info(f'Cancelling {len(pending_awaits)} pending AwaitDispatches')
-			for future in pending_awaits:
-				future.cancel()
+		if self._actives:
+			self.logger.warning(f'Cancelling {len(self._actives)} active dispatches and their AwaitDispatches')
 
-		if self._active_dispatches:
-			self.logger.info(f'Cancelling {len(self._active_dispatches)} actions')
-			for future in self._active_dispatches:
-				future.cancel()
+			for active in self._actives:
+				future = active.get_ad_future()
+				if future:
+					future.cancel()
+
+				future = active.action_future
+				if future:
+					future.cancel()
 
 		self.logger.debug('Shutting down loop thread, and joining thread')
 		self.loop_thread.shutdown_loop()
@@ -285,7 +314,11 @@ class ResponseDispatcher(object):
 
 			self.actions[action.name] = action
 
-	def _set_await_dispatch(self, source: object, key: Tuple[str, uuid.UUID], provider: 'AbstractAwaitDispatch') -> None:
+	def _add_active_action(
+		self,
+		source: object,
+		action: 'Action', provider: Optional['AbstractAwaitDispatch']
+	) -> ActiveAction:
 		"""
 		Prepares an AwaitDispatch object so that the action that created it can `await` its results. The AwaitDispatch's
 		future's result is set when a dispatch() occurs for that particular action response-id.
@@ -294,32 +327,35 @@ class ResponseDispatcher(object):
 		:param provider: The provider of the AwaitDispatch object
 		"""
 		with self._lock:
-			self._active_ads[key] = provider
+			active = ActiveAction(action=action, provider=provider)
 
-			action, uuid_ = key
+			self._actives.add(
+				active,
+				guid=provider.get_await_dispatch().guid if provider else None,
+				source=source,
+				action=action.name,
+			)
 
-			action_key = (action, source)
-
-			self._active_ads_per_source[action_key] = provider
+			return active
 
 	# This is public because AwaitDispatch uses it
-	def delete_await_dispatch(self, key: Tuple[str, uuid.UUID]):
+	def remove_active_by_action(self, action: str, guid: Optional[uuid.UUID]):
 		with self._lock:
-			provider = self._active_ads[key]
+			active_action = self._actives.lookup_one(action=action, guid=guid)
+			self._actives.remove(active_action)
 
-			del self._active_ads[key]
-
-			action, uuid_ = key
-
-			action_key = (action, provider.get_await_dispatch().source)
-
-			del self._active_ads_per_source[action_key]
-
-			del provider
-
-	def _get_await_dispatch(self, key: Tuple[str, uuid.UUID]):
+	def remove_active_action(self, active_action: ActiveAction):
 		with self._lock:
-			return self._active_ads.get(key)
+			self._actives.remove(active_action)
+
+	def _try_get_await_dispatch(self, action: str, guid: Optional[uuid.UUID]) -> Optional['AwaitDispatch']:
+		with self._lock:
+			active_action = self._actives.try_lookup_one(action=action, guid=guid)
+
+			if not active_action or not active_action.provider:
+				return None
+
+			return active_action.provider.get_await_dispatch()
 
 	@classmethod
 	def _validate_param_set(cls, param_set: ParameterSet):
@@ -429,21 +465,23 @@ class ResponseDispatcher(object):
 			# If it is then we need to check for in-flight DispatchResponses for the current action and source
 			# and cancel them
 
-			source_key = (action.name, source)
+			active_action = self._actives.try_lookup_one(action=action.name, source=source)
 
-			provider = self._active_ads_per_source.get(source_key)
+			if not active_action:
+				return
 
-			if provider is not None:
-				pending_await = provider.get_await_dispatch()
+			guid: Optional[uuid.UUID] = None
+
+			if active_action.provider is not None:
+				pending_await = active_action.provider.get_await_dispatch()
 
 				future = pending_await.get_current_future()
+				guid = pending_await.guid
 
 				if future:
 					self.logger.info(f'Cancelling pending exclusive {action.name!r} action')
-					# Mark as removed so done callback doesn't try to remove it again
+					# Mark as removed so done callback in dispatch() doesn't try to remove it again
 					pending_await.mark_removed()
-					# Immediately remove it now
-					self.delete_await_dispatch((action.name, pending_await.guid))
 
 					def cancel_callback():
 						# Cancel future and timeout if any
@@ -451,6 +489,12 @@ class ResponseDispatcher(object):
 						pending_await.cancel_timeout()
 
 					self.loop_thread.call_soon_threadsafe(cancel_callback)
+
+			if active_action.action_future:
+				active_action.action_future.cancel()
+
+			# Immediately remove it now
+			self.remove_active_by_action(action.name, guid)
 
 	def dispatch(self, source: object, action_name: str, args: Dict, response_id: Union[str, uuid.UUID] = None):
 		"""
@@ -490,14 +534,15 @@ class ResponseDispatcher(object):
 			except ValueError:
 				raise DispatchError('Invalid response id')
 
-			dispatch_key = (action_name, response_guid)
-			existing_ad = self._get_await_dispatch(dispatch_key)
+			existing_ad = self._try_get_await_dispatch(action_name, response_guid)
 
 		# If there is no existing_ad, then this is a new action
 		if not existing_ad:
 			cleanup_callback: Optional[Callable] = None
 			async_dispatch_callback: Optional[Callable[['Action', Iterable], Any]] = None
 			await_dispatch: Optional['AwaitDispatch'] = None
+
+			active_action: ActiveAction
 
 			# Verify parameters are correct, but not with type checking as there is a possibility
 			# of argument hooks returning correct parameter types later
@@ -518,7 +563,7 @@ class ResponseDispatcher(object):
 				args['await_dispatch'] = await_dispatch
 
 				# Prepare the AwaitDispatch
-				self._set_await_dispatch(source, (action_name, await_dispatch.guid), await_dispatch)
+				active_action = self._add_active_action(source, action, await_dispatch)
 
 				self.logger.debug(f'Action is coroutine, created AwaitDispatch: {await_dispatch}')
 
@@ -537,6 +582,13 @@ class ResponseDispatcher(object):
 			else:
 				async def call_dispatch(dispatch_action: Action, dispatch_args) -> Any:
 					return dispatch_action.func(dispatch_action.instance, **dispatch_args)
+
+				active_action = self._add_active_action(source, action, None)
+
+				def remove_active_callback():
+					self.remove_active_action(active_action)
+
+				cleanup_callback = remove_active_callback
 
 				# Set async callback used to call non-async function
 				async_dispatch_callback = call_dispatch
@@ -560,7 +612,8 @@ class ResponseDispatcher(object):
 						passed_args = {k: passed_args[k] for k in passed_args.keys() & action.params.keys()}
 
 					dispatch_future = asyncio.ensure_future(async_dispatch_callback(action, passed_args), loop=self.loop_thread.event_loop)
-					self._active_dispatches.add(dispatch_future)
+
+					active_action.action_future = dispatch_future
 
 					return await dispatch_future
 
@@ -584,7 +637,7 @@ class ResponseDispatcher(object):
 
 				finally:
 					if dispatch_future:
-						self._active_dispatches.remove(dispatch_future)
+						active_action.action_future = None
 
 			def done_callback(loop_thread: EventLoopThread, done_future: asyncio.Future):
 				# Call cleanup handler if any
@@ -627,7 +680,7 @@ class ResponseDispatcher(object):
 			# TODO: A continuation dispatch will default to
 			self._verify_full_arguments(
 				action_name=action_name,
-				params=existing_ad.get_await_dispatch().get_current_params(),
+				params=existing_ad.get_await_dispatch().get_current_params() or {},
 				args=args,
 			)
 
@@ -817,7 +870,7 @@ class AwaitDispatch(AbstractAwaitDispatch):
 			self.dispatcher.logger.info('AwaitDispatch already removed')
 			return
 
-		self.dispatcher.delete_await_dispatch((self.action_name, self.guid))
+		self.dispatcher.remove_active_by_action(self.action_name, self.guid)
 		self.mark_removed()
 
 		self.cancel_timeout()
