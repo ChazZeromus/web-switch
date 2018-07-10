@@ -1,18 +1,35 @@
 import WebSocket from 'ws';
 import _ from 'lodash';
 import EventEmitter from 'events';
+import MonotonicNow from 'monotonic-timestamp';
+import { uuidv4 } from 'uuid/v4';
 
 export default class Client extends EventEmitter {
-    constructor(url) {
+    constructor(url, socketCreator = null) {
         super();
 
-        this.ws = new WebSocket(url);
+        this.ws = null;
+
+        let _url;
+
+        if (_.isString(url)) {
+            _url = url;
+        }
+        else if (_.isFunction(url)) {
+            _url = url();
+        }
+        else {
+            throw new Error('Url parameter must be string or function');
+        }
+
+        this.ws = _.isFunction(socketCreator) ? socketCreator(_url) : new WebSocket(_url);
 
         this.ws.addEventListener('message', this.handleMessage.bind(this));
         this.ws.addEventListener('open', this.handleOpen.bind(this));
         this.ws.addEventListener('close', this.handleClose.bind(this));
         this.ws.addEventListener('error', this.handleError.bind(this));
         this.convos = {};
+        this.queues = {};
     }
 
     handleOpen(data) {
@@ -66,14 +83,14 @@ export default class Client extends EventEmitter {
         }
     }
 
-    getMessage(guid) {
+    async getMessageAsync(guid) {
         const queue = this.queues[guid];
 
-        if (!queue || queue.length === 0) {
-            return null;
+        if (!queue) {
+            this.queues[guid] = new AsyncQueue();
         }
 
-        return queue.shift();
+        return this.queues.getAsync();
     }
 
     async send(data, timeout=2000) {
@@ -105,14 +122,31 @@ export default class Client extends EventEmitter {
         return this.ws.send(json);
     }
 
-    waitForReply(filter, timeout=2000) {
-        return this.waitForAsync(
-            'message',
-            filter,
-            timeout,
-            true,
-            () => new Error('Timed out waiting for reply'),
-        )
+    async convo(actionName, asyncAction) {
+        const guid = uuidv4();
+        const convo = new Convo(this, actionName, guid);
+
+        this.convos[convo] = convo;
+
+        if (!asyncAction instanceof Promise) {
+            throw new Error('asyncAction must be promise/async');
+        }
+
+        try {
+            const result = await asyncAction(convo, guid);
+        }
+        catch (e) {
+            console.error(`Error occurred while in convo for ${actionName}:${guid}`)
+        }
+        finally {
+            delete this.convos[convo];
+
+            if (guid in self.queues) {
+                const queue = self.queues;
+                queue.close();
+                delete self.queues[guid];
+            }
+        }
     }
 
     close() {
@@ -136,6 +170,14 @@ export class AsyncQueue {
         }
     }
 
+    close() {
+        if (this._reject) {
+            this._reject(Error('AsyncQueue closing'));
+            this._reject = null;
+            this._resolve = null;
+        }
+    }
+
     async getAsync() {
         if (this._resolve !== null) {
             throw new Error('AsyncQueue.get() already blocking');
@@ -145,7 +187,10 @@ export class AsyncQueue {
             return this.items.shift();
         }
 
-        return new Promise((resolve, reject) => { this._resolve = resolve; } );
+        return new Promise((resolve, reject) => {
+            this._resolve = resolve;
+            this._reject = reject;
+        });
     }
 
     get length() {
@@ -153,18 +198,28 @@ export class AsyncQueue {
     }
 }
 
-class Convo {
-    constructor(client, guid) {
-        this.client = client;
-        this.guid   = guid;
-        this.queue = AsyncQueue();
+export class Convo {
+    constructor(client, action, guid) {
+        this.client         = client;
+        this.guid           = guid;
+        this.action         = action;
+        this.startTimestamp = MonotonicNow();
     }
 
     async expect(timeout=5.0) {
+        return timeboxPromise(this.client.getMessageAsync(this.guid), timeout);
+    }
+
+    async send(data) {
+        return this.client.send({
+            ...data,
+            action: this.action,
+            response_id: this.guid,
+        });
     }
 
     async sendAndExpect(data, timeout=5.0) {
-        await this.client.send({...data, response_id: this.guid}, timeout);
+        await this.send(data);
         return this.expect(timeout);
     }
 }
@@ -180,7 +235,7 @@ export function timeboxPromise(promise, timeout, onTimeout=null) {
                 onTimeout();
             }
 
-            reject(Error('Promise did not resolve in time'));
+            reject(new Error('Promise did not resolve in time'));
         };
 
         const cancelTimeout = () => {

@@ -1,4 +1,4 @@
-import Client, { timeboxPromise, AsyncQueue } from '../client';
+import Client, { timeboxPromise, AsyncQueue, Convo } from '../client';
 
 function timeoutPromise(resolveValue, time) {
     return new Promise(resolve => setTimeout(() => resolve(resolveValue), time));
@@ -95,5 +95,66 @@ describe('AsyncQueue', () => {
         await expect(timeboxPromise((async () => {
             expect(await queue.getAsync()).toBe(items[2]);
         })(), 45)).rejects.toThrow(/^Promise did not resolve/);
+    });
+});
+
+describe('Convo', () => {
+    const uuid = '123F00';
+
+    class MockClient {
+        constructor() {
+            this.sends = [];
+            this.gets = [];
+            this._getMessageAsync = async guid => {
+                expect(guid).toBe(uuid);
+                return this.gets.shift();
+            };
+            this.getMessageAsync = this._getMessageAsync;
+
+            this._send = data => this.sends.push(data);
+            this.send = this._send;
+        }
+
+        reset() {
+            this.sends = [];
+            this.gets = [];
+            this.getMessageAsync = this._getMessageAsync;
+            this.send = this._send;
+        }
+    }
+
+    const client = new MockClient();
+
+    beforeEach(() => client.reset());
+
+    it('sends and expects a message successfully', async () => {
+        const convo = new Convo(client, 'test_action', uuid);
+
+        client.gets.push('hello');
+
+        await (async convo => {
+             expect(await convo.sendAndExpect({msg: 'yo'})).toBe('hello');
+        })(convo);
+
+        expect(client.sends).toContainEqual(
+            expect.objectContaining({
+                action: 'test_action',
+                msg: 'yo',
+                response_id: uuid,
+            })
+        );
+    });
+
+    it('times out on an expect', async () => {
+        const convo = new Convo(client, 'test_action', uuid);
+
+        client.gets.push('not suppose to get this');
+
+        client.getMessageAsync = async guid => {
+            await sleep(70);
+            return null;
+        };
+
+        await expect(convo.sendAndExpect({msg: 'hey'}, 50)).rejects.toThrow(/^Promise did not resolve/);
     });
 });

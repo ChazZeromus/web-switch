@@ -68,7 +68,10 @@ class ChannelClient(object):
 	def set_room_key(self, key: Tuple[str, str]):
 		self._room_key = key
 
-	async def send(self, message: Message, response_id: Optional[uuid.UUID]):
+	async def send(self, message: Union[Message, Dict], response_id: Optional[uuid.UUID]):
+		if isinstance(message, dict):
+			message = Message(data=message)
+
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
@@ -97,10 +100,10 @@ class Conversation(AbstractAwaitDispatch):
 	def get_await_dispatch(self):
 		return self.await_dispatch
 
-	async def send(self, data: Dict):
-		await self.client.send(Message(data=data), self.await_dispatch.guid)
+	async def send(self, data: Union[Message, Dict]):
+		await self.client.send(data, self.await_dispatch.guid)
 
-	async def send_and_recv(self, data: Dict, expect_params: Dict[str, Type] = None, timeout: float = None):
+	async def send_and_recv(self, data: Union[Message, Dict], expect_params: Dict[str, Type] = None, timeout: float = None):
 		await self.send(data)
 		return await self(params=expect_params, timeout=timeout)
 
@@ -252,7 +255,6 @@ class ChannelServer(Router):
 			connection.close(reason=str(e))
 
 	def on_remove(self, connection: Connection):
-		# TODO: Remove and cleanup ChannelClients from whatever lists, dicts
 		self.handle_remove_connection(connection)
 
 	def on_message(self, connection: Connection, message: Message):
@@ -293,7 +295,7 @@ class ChannelServer(Router):
 
 		return client
 
-	# Define our exception handler for actions so we can send back a
+	# Define our exception handler for actions so we can notify client of the error for the particular response_id.
 	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID):
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
@@ -313,7 +315,7 @@ class ChannelServer(Router):
 		assert isinstance(source, ChannelClient)
 
 		if isinstance(result, Dict):
-			source.try_send(Message(data=result), response_id)
+			source.try_send(Message(data=result, is_final=True), response_id)
 		else:
 			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
 

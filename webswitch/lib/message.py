@@ -6,6 +6,14 @@ from typing import *
 from .router.errors import RouterError
 
 
+class MessageError(Exception):
+	pass
+
+
+class ReservedKeyError(MessageError):
+	pass
+
+
 class MessageJSONEncoder(json.JSONEncoder):
 	def default(self, obj):
 		if isinstance(obj, uuid.UUID):
@@ -15,17 +23,24 @@ class MessageJSONEncoder(json.JSONEncoder):
 
 
 class Message(object):
+	_RESERVED_KEYS = {'success', 'error', 'error_data', '__final'}
+
 	def __init__(
 		self,
 		data: dict = None,
 		success: bool = None,
 		error: str = None,
-		error_data: Dict = None
+		error_data: Dict = None,
+		*, is_final: bool = False,
 	) -> None:
 		self.data: Dict = deepcopy(data) if data is not None else {}
+
+		Message.verify_reserved_use(self.data)
+
 		self.success: Optional[bool] = success
 		self.error: Optional[str] = error
 		self.error_data: Optional[Dict] = error_data
+		self.is_final = is_final
 
 	def load(self, json_data) -> 'Message':
 		self.data = deepcopy(json_data)
@@ -33,12 +48,18 @@ class Message(object):
 		self.success = json_data.get('success')
 		self.error = json_data.get('error')
 		self.error_data = json_data.get('error_data')
+		self.is_final = bool(json_data.get('__final'))
 
 		for key in ('success', 'error', 'error_data'):
 			if key in self.data:
 				del self.data[key]
 
 		return self
+
+	@classmethod
+	def verify_reserved_use(cls, data: dict):
+		if set(data.keys()) & cls._RESERVED_KEYS:
+			raise ReservedKeyError()
 
 	@classmethod
 	def error_from_exc(cls, exc: BaseException):
@@ -104,6 +125,9 @@ class Message(object):
 
 		if self.error_data:
 			payload['error_data'] = self.error_data
+
+		if self.is_final:
+			payload['__final'] = True
 
 		return json.dumps(payload, cls=MessageJSONEncoder)
 

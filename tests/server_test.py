@@ -5,6 +5,7 @@ from asyncio import sleep as async_sleep
 from .common import *
 from webswitch.lib.channel_server import Conversation, add_action, ChannelClient, AwaitDispatch
 from webswitch.lib.client import Client, ResponseException
+from webswitch.lib.message import Message
 
 
 class UniqueError(Exception):
@@ -40,7 +41,7 @@ class ServerTestingServer(ChannelServerBase):
 
 	@add_action()
 	async def action_send_error_and_continue(self, convo: Conversation, client: 'ChannelClient'):
-		response = await convo.send_and_recv({'error': 'some error', 'msg': 'give me nothing'})
+		response = await convo.send_and_recv(Message({'msg': 'give me nothing'}, error='some error'))
 		raise Exception('Not suppose to receive a response!')
 
 
