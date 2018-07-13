@@ -101,9 +101,7 @@ export default class Client extends EventEmitter {
             case WebSocket.CONNECTING:
                 console.log('Socket still opening, waiting to send', data);
 
-                await this.waitForAsync('open', true, timeout, true,
-                    data => new Error(data)
-                );
+                await this.wait('open', timeout).catch(data => { throw new Error(data); });
                 break;
 
             case WebSocket.OPEN:
@@ -152,6 +150,22 @@ export default class Client extends EventEmitter {
     close() {
         return this.ws.close();
     }
+
+    wait(event, timeout) {
+        let onEvent = null;
+
+        return timeboxPromise(new Promise((resolve, reject) => {
+                onEvent = data => resolve(data);
+                this.once(event, onEvent);
+            }),
+            timeout,
+            () => {
+                if (onEvent) {
+                    this.off(event, onEvent)
+                }
+            }
+        );
+    }
 }
 
 export class AsyncQueue {
@@ -172,7 +186,7 @@ export class AsyncQueue {
 
     close() {
         if (this._reject) {
-            this._reject(Error('AsyncQueue closing'));
+            this._reject(new Error('AsyncQueue closing'));
             this._reject = null;
             this._resolve = null;
         }

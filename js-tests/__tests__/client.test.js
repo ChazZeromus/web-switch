@@ -1,4 +1,5 @@
 import Client, { timeboxPromise, AsyncQueue, Convo } from '../client';
+import WebSocket from 'ws'
 
 function timeoutPromise(resolveValue, time) {
     return new Promise(resolve => setTimeout(() => resolve(resolveValue), time));
@@ -156,5 +157,54 @@ describe('Convo', () => {
         };
 
         await expect(convo.sendAndExpect({msg: 'hey'}, 50)).rejects.toThrow(/^Promise did not resolve/);
+    });
+});
+
+describe('Client', () => {
+
+    class MockSocket {
+        constructor(url) {
+            this.sends = [];
+
+            const notImpl = () => { throw new Error('Not implemented'); };
+
+            this.onmessage = notImpl;
+            this.onopen = notImpl;
+            this.onclose = notImpl;
+            this.onerror = notImpl;
+            this.readyState = WebSocket.CONNECTING;
+        }
+
+        send(data) {
+            this.sends.push(data);
+            (async () => this.onmessage({data}))();
+        }
+
+        addEventListener(event, fn) {
+            this[`on${event}`] = fn;
+        }
+    }
+    it('delays connection for 10ms and sends message', async () => {
+        debugger;
+        const mockSocket = new MockSocket();
+        const client = new Client('whatever', () => mockSocket);
+
+        const data = {data: 'yo'};
+        const json_data = JSON.stringify(data);
+
+        const promise = timeboxPromise(
+            (async () => {
+                await client.send(data);
+                expect(mockSocket.sends).toEqual([json_data]);
+            })(),
+            20
+        );
+
+        await sleep(10);
+
+        mockSocket.readyState = WebSocket.OPEN;
+        mockSocket.onopen({});
+
+        await promise;
     });
 });
