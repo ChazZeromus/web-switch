@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import _ from 'lodash';
 import EventEmitter from 'events';
 import MonotonicNow from 'monotonic-timestamp';
-import { uuidv4 } from 'uuid/v4';
+import uuidv4 from 'uuid/v4';
 
 export default class Client extends EventEmitter {
     constructor(url, socketCreator = null) {
@@ -53,7 +53,7 @@ export default class Client extends EventEmitter {
     }
 
     static _extract_guid(obj) {
-        return _.get(obj, 'response_id', null) || _.get(obj, 'error_data.response_id');
+        return _.get(obj, 'response_id', null) || _.get(obj, 'error_data.response_id', null);
     }
 
     _parseMessage(data) {
@@ -66,17 +66,10 @@ export default class Client extends EventEmitter {
             let queue = this.queues[guid];
 
             if (!queue) {
-                this.queues[guid] = queue = [];
+                this.queues[guid] = queue = new AsyncQueue();
             }
 
-            if (!convo) {
-                queue.push(obj);
-            }
-            else {
-                if (!convo.submitMessage(obj)) {
-                    queue.push(obj);
-                }
-            }
+            queue.put(obj);
         }
         catch (e) {
             console.error('Error parsing message:', e);
@@ -84,13 +77,15 @@ export default class Client extends EventEmitter {
     }
 
     async getMessageAsync(guid) {
-        const queue = this.queues[guid];
+        let queue = this.queues[guid];
 
         if (!queue) {
-            this.queues[guid] = new AsyncQueue();
+            this.queues[guid] = queue = new AsyncQueue();
         }
 
-        return this.queues.getAsync();
+        console.log('what', queue);
+
+        return queue.getAsync();
     }
 
     async send(data, timeout=2000) {
@@ -126,23 +121,26 @@ export default class Client extends EventEmitter {
 
         this.convos[convo] = convo;
 
-        if (!asyncAction instanceof Promise) {
+        const maybePromise = asyncAction(convo, guid);
+
+        if (!maybePromise instanceof Promise) {
             throw new Error('asyncAction must be promise/async');
         }
 
         try {
-            const result = await asyncAction(convo, guid);
+            const result = await maybePromise;
         }
         catch (e) {
-            console.error(`Error occurred while in convo for ${actionName}:${guid}`)
+            console.error(`Error occurred while in convo for ${actionName}:${guid}: ${e}`)
+            throw e;
         }
         finally {
             delete this.convos[convo];
 
-            if (guid in self.queues) {
-                const queue = self.queues;
+            if (guid in this.queues) {
+                const queue = this.queues[guid];
                 queue.close();
-                delete self.queues[guid];
+                delete this.queues[guid];
             }
         }
     }

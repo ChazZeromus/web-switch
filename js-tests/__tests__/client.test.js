@@ -9,6 +9,27 @@ async function sleep(time) {
     return timeoutPromise(true, time);
 }
 
+class MockClient {
+    constructor() {
+        this.sends = [];
+        this.gets = [];
+        this._getMessageAsync = async guid => {
+            return this.gets.shift();
+        };
+        this.getMessageAsync = this._getMessageAsync;
+
+        this._send = data => this.sends.push(data);
+        this.send = this._send;
+    }
+
+    reset() {
+        this.sends = [];
+        this.gets = [];
+        this.getMessageAsync = this._getMessageAsync;
+        this.send = this._send;
+    }
+}
+
 describe('timeboxPromise', () => {
     it('times out', async () => {
         await expect(timeboxPromise(timeoutPromise('yo', 200), 180)).rejects.toThrow(/^Promise did not resolve/);
@@ -102,28 +123,6 @@ describe('AsyncQueue', () => {
 describe('Convo', () => {
     const uuid = '123F00';
 
-    class MockClient {
-        constructor() {
-            this.sends = [];
-            this.gets = [];
-            this._getMessageAsync = async guid => {
-                expect(guid).toBe(uuid);
-                return this.gets.shift();
-            };
-            this.getMessageAsync = this._getMessageAsync;
-
-            this._send = data => this.sends.push(data);
-            this.send = this._send;
-        }
-
-        reset() {
-            this.sends = [];
-            this.gets = [];
-            this.getMessageAsync = this._getMessageAsync;
-            this.send = this._send;
-        }
-    }
-
     const client = new MockClient();
 
     beforeEach(() => client.reset());
@@ -177,34 +176,82 @@ describe('Client', () => {
 
         send(data) {
             this.sends.push(data);
-            (async () => this.onmessage({data}))();
         }
 
         addEventListener(event, fn) {
             this[`on${event}`] = fn;
         }
+
+        mockServerSend(data) {
+            this.onmessage({data});
+        }
+
+        mockConnect() {
+            this.readyState = WebSocket.OPEN;
+            this.onopen({});
+        }
+
+        getAllDecodedSends() {
+            const results = [];
+            this.sends.forEach(msg => results.push(JSON.parse(msg)));
+
+            return results;
+        }
+
+        popDecoded() {
+            if (this.sends.length === 0) {
+                return null;
+            }
+
+            const top = this.sends.pop();
+            return JSON.parse(top);
+        }
     }
+
     it('delays connection for 10ms and sends message', async () => {
-        debugger;
         const mockSocket = new MockSocket();
         const client = new Client('whatever', () => mockSocket);
 
-        const data = {data: 'yo'};
-        const json_data = JSON.stringify(data);
-
         const promise = timeboxPromise(
             (async () => {
+                const data = {data: 'yo'};
+
                 await client.send(data);
-                expect(mockSocket.sends).toEqual([json_data]);
+                expect(mockSocket.getAllDecodedSends()).toEqual([data]);
             })(),
             20
         );
 
         await sleep(10);
 
-        mockSocket.readyState = WebSocket.OPEN;
-        mockSocket.onopen({});
+        mockSocket.mockConnect();
 
         await promise;
+    });
+
+    it('has a conversation', async () => {
+        const mockSocket = new MockSocket();
+        const client = new Client('whatever', () => mockSocket);
+
+        await client.convo('foo', async (convo, guid) => {
+            let promise;
+            let data = {data: 'hey'};
+
+            mockSocket.mockConnect();
+
+            promise = convo.sendAndExpect(data, 20);
+
+            // Wait a while to so we get the hey
+            await sleep(5);
+
+            expect(mockSocket.popDecoded()).toEqual(expect.objectContaining(data));
+
+            debugger;
+
+            data = {hello: 'hi', response_id: guid};
+            mockSocket.mockServerSend(JSON.stringify(data));
+
+            expect(await promise).toEqual(expect.objectContaining(data));
+        });
     });
 });
