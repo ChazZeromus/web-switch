@@ -246,12 +246,35 @@ describe('Client', () => {
 
             expect(mockSocket.popDecoded()).toEqual(expect.objectContaining(data));
 
-            debugger;
-
             data = {hello: 'hi', response_id: guid};
             mockSocket.mockServerSend(JSON.stringify(data));
 
             expect(await promise).toEqual(expect.objectContaining(data));
         });
+    });
+
+    it('expects multiple messages', async () => {
+        const mockSocket = new MockSocket();
+        const client = new Client('whatever', () => mockSocket);
+
+        await client.convo('bar', async (convo, guid) => {
+            let data = ['omae', 'wa', 'moe', 'shinderu'];
+
+            mockSocket.mockConnect();
+
+            const promise = (async () => {
+                for (let i = 0; i< data.length; ++i) {
+                    await sleep(5);
+                    mockSocket.mockServerSend(JSON.stringify({data: data[i], response_id: guid}));
+                }
+            })();
+
+            for (let i = 0; i< data.length; ++i) {
+                expect(await convo.expect(10)).toEqual({data: data[i], response_id: guid});
+            }
+
+            // In case the async function threw any errors.
+            await promise;
+         });
     });
 });
