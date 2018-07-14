@@ -83,8 +83,6 @@ export default class Client extends EventEmitter {
             this.queues[guid] = queue = new AsyncQueue();
         }
 
-        console.log('what', queue);
-
         return queue.getAsync();
     }
 
@@ -145,8 +143,8 @@ export default class Client extends EventEmitter {
         }
     }
 
-    close() {
-        return this.ws.close();
+    async close(code=1000, reason='') {
+        return this.ws.close(code, reason);
     }
 
     wait(event, timeout) {
@@ -218,7 +216,7 @@ export class Convo {
         this.startTimestamp = MonotonicNow();
     }
 
-    async expect(timeout=5.0) {
+    async expect(timeout=5000.0) {
         return timeboxPromise(this.client.getMessageAsync(this.guid), timeout);
     }
 
@@ -230,7 +228,7 @@ export class Convo {
         });
     }
 
-    async sendAndExpect(data, timeout=5.0) {
+    async sendAndExpect(data, timeout=5000.0) {
         await this.send(data);
         return this.expect(timeout);
     }
