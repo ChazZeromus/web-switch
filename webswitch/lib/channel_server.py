@@ -3,7 +3,6 @@ from typing import *
 import traceback
 import uuid
 import argparse
-from logging import DEBUG
 
 from .logger import g_logger
 from .dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
@@ -370,10 +369,17 @@ def cli_main():
 		help='Port to listen on',
 	)
 
+	parser.add_argument(
+		'-l', '--log-level',
+		type=str,
+		choices=('DEBUG', 'WARN', 'WARNING', 'INFO', 'ERROR'),
+		default='DEBUG',
+	)
+
 	args = parser.parse_args()
 
 	logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')
-	g_logger.setLevel(DEBUG)
+	g_logger.setLevel(args.log_level.upper())
 
 	router = ChannelServer(args.host, args.port)
 	router.serve(daemon=False)
