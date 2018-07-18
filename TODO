@@ -206,3 +206,5 @@ gracefully when this happens?
     Done
 
 Each convo should have a EOF of some kind so we know that client convos can be freed of resources.
+
+Fix DispatchNotStarted errors
