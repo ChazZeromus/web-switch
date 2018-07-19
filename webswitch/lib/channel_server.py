@@ -207,9 +207,8 @@ class ChannelServer(Router):
 			room.remove(client)
 			del self.id_to_client[client.id]
 
+			self.logger.info(f'Removed last connection of {client!r}, removed client and cancelling actions')
 			self.dispatcher.cancel_action_by_source(client)
-
-			self.logger.info(f'Removed last connection of {client!r}, removed client')
 
 	def on_start(self):
 		self.dispatcher.start()
