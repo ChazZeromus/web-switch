@@ -1,7 +1,5 @@
 import logging
-from logging.handlers import SocketHandler
-from webswitch.lib.logger import g_logger
-from .common import TimeBox
+from webswitch.logger import g_logger
 
 logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')
 g_logger.setLevel(logging.DEBUG)

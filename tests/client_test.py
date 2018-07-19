@@ -3,9 +3,9 @@ import asyncio
 import pytest
 from typing import *
 
-from webswitch.lib.router.errors import RouterError
-from webswitch.lib.client import Client, ResponseException, ResponseTimeoutException
-from webswitch.lib.channel_server import Conversation, add_action, ChannelClient
+from webswitch.router.errors import RouterError
+from webswitch.client import Client, ResponseException, ResponseTimeoutException
+from webswitch.channel_server import Conversation, add_action, ChannelClient
 
 from .common import *
 

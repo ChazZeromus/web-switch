@@ -3,9 +3,9 @@ import pytest
 from asyncio import sleep as async_sleep
 
 from .common import *
-from webswitch.lib.channel_server import Conversation, add_action, ChannelClient, AwaitDispatch
-from webswitch.lib.client import Client, ResponseException
-from webswitch.lib.message import Message
+from webswitch.channel_server import Conversation, add_action, ChannelClient
+from webswitch.client import Client, ResponseException
+from webswitch.message import Message
 
 
 class UniqueError(Exception):
