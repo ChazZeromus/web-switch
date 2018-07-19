@@ -267,20 +267,25 @@ class ResponseDispatcher(object):
 		self.loop_thread = None
 
 	def cancel_action_by_source(self, source: object) -> None:
-		if not self.loop_thread:
-			raise DispatchNotStarted()
+		with self._lock:
+			if self._stopped:
+				self.logger.debug('Not cancelling action because dispatcher has already stopped')
+				return
 
-		active_actions = self._actives.lookup(source=source)
-		self.logger.info(f'Request for cancelling {len(active_actions)} active actions for source {source!r}')
+			if not self.loop_thread:
+				raise DispatchNotStarted()
 
-		if not active_actions:
-			return
+			active_actions = self._actives.lookup(source=source)
+			self.logger.info(f'Request for cancelling {len(active_actions)} active actions for source {source!r}')
 
-		def callback():
-			for active in active_actions:
-				active.cancel_all()
+			if not active_actions:
+				return
 
-		self.loop_thread.call_soon_threadsafe(callback)
+			def callback():
+				for active in active_actions:
+					active.cancel_all()
+
+			self.loop_thread.call_soon_threadsafe(callback)
 
 	def _build_actions(self):
 		"""
