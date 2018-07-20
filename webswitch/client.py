@@ -148,7 +148,6 @@ class MessageQueues(object):
 		return list(self._queues.keys())
 
 
-
 class Client:
 	last_instance_id = 0
 
@@ -184,7 +183,7 @@ class Client:
 	async def __aenter__(self, *args, **kwargs) -> 'Client':
 		self._ctx = await self._connection.__aenter__(*args, **kwargs)
 		self._loop_fut = asyncio.ensure_future(self._recv_loop())
-		self._logger.debug('Entering')
+		self._logger.debug(f'Async enter from event loop id {id(asyncio.get_event_loop()):x}')
 
 		message = await self.convo('whoami').send_and_expect({}, WHOAMI_WAIT)
 

@@ -1,6 +1,7 @@
 import logging
 import pytest
-from asyncio import sleep as async_sleep
+from threading import Thread, Event
+from asyncio import sleep as async_sleep, new_event_loop
 
 from .common import *
 from webswitch.channel_server import Conversation, add_action, ChannelClient
@@ -83,7 +84,7 @@ async def test_response_dispatch_timeout(get_server, get_client, caplog):
 
 
 @pytest.mark.asyncio
-async def test_response_dispatch_cancel(get_server, get_client, caplog):
+async def test_response_dispatch_no_cancel(get_server, get_client, caplog):
 	server = get_server()
 	server.serve(daemon=True)
 
@@ -92,10 +93,9 @@ async def test_response_dispatch_cancel(get_server, get_client, caplog):
 		response = await convo.send_and_expect(data={'timeout': 0.1})
 		assert 'confirmed' in response.data
 
+	# Make sure stop timeout does not expire
 	wait_time = 0.2
-
 	caplog.clear()
-	# Make sure stop timeout expires
 	with caplog.at_level(logging.DEBUG):
 		server.stop_serve(wait_time)
 
@@ -104,10 +104,55 @@ async def test_response_dispatch_cancel(get_server, get_client, caplog):
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Stop requested with *')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern=f'Waiting {wait_time} seconds *')
 	assert not filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Took too long to finish*')
-	assert not filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * actions')
+	assert not filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='All AwaitDispatches finished')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='All active dispatch actions finished')
 
+@pytest.mark.asyncio
+async def test_response_dispatch_do_cancel(get_server, get_client, caplog):
+	server = get_server()
+	server.serve(daemon=True)
+
+	# Note: Because of Note 1, we have to create a client on a new event loop in a separate thread as to make sure the
+	# client can handle disconnects from the server.
+
+	client_send_event = Event()
+	server_stop_event = Event()
+
+	def thread_main():
+		async def async_main():
+			async with get_client() as client:
+				convo = client.convo('timeout')
+				# Make sure stop_serve() timeout expires while server sleeps for 10 seconds
+				response = await convo.send_and_expect(data={'timeout': 10.0})
+				assert 'confirmed' in response.data
+				client_send_event.set()
+
+				while not server_stop_event.is_set():
+					await async_sleep(0.001)
+
+		event_loop = new_event_loop()
+		event_loop.run_until_complete(async_main())
+
+	thread = Thread(name='Client event loop thread', target=thread_main)
+	thread.start()
+	client_send_event.wait()
+
+	wait_time = 0.3
+
+	caplog.clear()
+	with caplog.at_level(logging.DEBUG):
+		server.stop_serve(wait_time)
+
+	server_stop_event.set()
+	thread.join()
+
+	name_pattern = 'web-switch.ResponseDispatch:*'
+
+	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Stop requested with *')
+	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern=f'Waiting {wait_time} seconds *')
+	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Took too long to finish*')
+	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
 
 @pytest.mark.asyncio
 async def test_unique_error_nonasync(client_with_server: Client):
@@ -175,4 +220,10 @@ async def test_client_error(get_server, get_client):
 	with TimeBox(2) as window:
 		server.stop_serve(window.timelimit)
 
+
+# Note 1:
+# It's important to note that we don't want to stop_serve() inside of client context because
+# stop_serve() will try to close connections but only if they connections ever terminate or
+# receive a close websocket frame. But since stop_serve() is being called within the client context,
+# disconnect does not occur because stop_serve() is blocking client from exiting context and disconnecting.
 

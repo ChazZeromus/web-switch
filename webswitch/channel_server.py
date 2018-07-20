@@ -300,7 +300,7 @@ class ChannelServer(Router):
 		assert isinstance(source, ChannelClient)
 
 		if not isinstance(e, RouterError):
-			e = ChannelServerResponseError(f'Unexpected non-RouterError exception: {e}', orig_exc=e, response=response_id)
+			e = ChannelServerResponseError(f'Unexpected non-RouterError exception: {str(e) or repr(e)}', orig_exc=e, response=response_id)
 
 		# Try to set response ID even if error isn't ChannelServerResponseError
 		if response_id:
