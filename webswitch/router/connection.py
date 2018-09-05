@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import threading
-from typing import Optional, List
+from typing import Optional, List, Any
 
 import websockets
 from websockets import WebSocketServerProtocol
@@ -20,12 +20,12 @@ class ConnectionList:
 			self.last_connection_id += 1
 			return self.last_connection_id
 
-	def add(self, connection: 'Connection'):
+	def add(self, connection: 'Connection') -> None:
 		with self._lock:
 			self.connections.append(connection)
 			connection.in_pool = True
 
-	def remove(self, connection: 'Connection'):
+	def remove(self, connection: 'Connection') -> None:
 		with self._lock:
 			self.connections.remove(connection)
 
@@ -41,7 +41,7 @@ class ConnectionList:
 		with self._lock:
 			return self.connections[:]
 
-	def close(self, reason: str):
+	def close(self, reason: str) -> None:
 		with self._lock:
 			for conn in self.connections:
 				conn.close(reason=reason)
@@ -53,7 +53,7 @@ class Connection(object):
 		conn_list: ConnectionList,
 		event_loop: asyncio.AbstractEventLoop,
 		ws: WebSocketServerProtocol = None,
-		**extra_kwargs
+		**extra_kwargs: Any
 	) -> None:
 		self.extra = extra_kwargs
 		self.ws: WebSocketServerProtocol = ws
@@ -75,7 +75,7 @@ class Connection(object):
 		self.logger = g_logger.getChild(f'Connection:{self.conn_id}')
 		self.logger.debug(f'Created connection {self!r}')
 
-	def copy_to_subclass(self, subclassed_object: 'Connection'):
+	def copy_to_subclass(self, subclassed_object: 'Connection') -> None:
 		"""
 		Copy contents of normal Connection object to subclass instance of Connection.
 		:param subclassed_object:
@@ -88,7 +88,7 @@ class Connection(object):
 			my_value = getattr(self, v)
 			setattr(subclassed_object, v, my_value)
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		if self.ws:
 			addr, port, *_ = self.ws.remote_address
 
@@ -104,7 +104,7 @@ class Connection(object):
 
 		return 'Connection({})'.format(','.join(tags))
 
-	def __str__(self):
+	def __str__(self) -> str:
 		if self.ws:
 			tags = [
 				f'id:{self.conn_id}',
@@ -117,7 +117,7 @@ class Connection(object):
 
 		return 'Connection({})'.format(','.join(tags))
 
-	def close(self, code: int = 1000, reason: str = ''):
+	def close(self, code: int = 1000, reason: str = '') -> None:
 		with self._close_lock:
 			if self._close_issued:
 				self.logger.warning('Close already issued')
@@ -129,7 +129,7 @@ class Connection(object):
 		self.close_code = code or 1000
 		self.close_reason = reason or ''
 
-		async def async_callback():
+		async def async_callback() -> bool:
 			with self._close_lock:
 				self._close_issued = True
 
@@ -155,13 +155,13 @@ class Connection(object):
 
 			return True
 
-		def callback():
+		def callback() -> None:
 			self.logger.debug('Scheduling close callback')
 			self.close_future = asyncio.ensure_future(async_callback(), loop=self.event_loop)
 
 		self.event_loop.call_soon_threadsafe(callback)
 
-	async def wait_closed(self):
+	async def wait_closed(self) -> None:
 		self.logger.debug('Waiting closed')
 		await self._close_event.wait()
 		self.logger.debug('Close arrived')

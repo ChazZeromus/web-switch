@@ -15,7 +15,7 @@ class ReservedKeyError(MessageError):
 
 
 class MessageJSONEncoder(json.JSONEncoder):
-	def default(self, obj):
+	def default(self, obj: Any) -> Any:
 		if isinstance(obj, uuid.UUID):
 			return str(obj)
 
@@ -27,10 +27,10 @@ class Message(object):
 
 	def __init__(
 		self,
-		data: dict = None,
-		success: bool = None,
-		error: str = None,
-		error_data: Dict = None,
+		data: Optional[Dict] = None,
+		success: Optional[bool] = None,
+		error: Optional[str] = None,
+		error_data: Optional[Dict] = None,
 		*, is_final: bool = False,
 	) -> None:
 		self.data: Dict = deepcopy(data) if data is not None else {}
@@ -40,9 +40,9 @@ class Message(object):
 		self.success: Optional[bool] = success
 		self.error: Optional[str] = error
 		self.error_data: Optional[Dict] = error_data
-		self.is_final = is_final
+		self.is_final: bool = is_final
 
-	def load(self, json_data) -> 'Message':
+	def load(self, json_data: Dict) -> 'Message':
 		self.data = deepcopy(json_data)
 
 		self.success = json_data.get('success')
@@ -57,12 +57,12 @@ class Message(object):
 		return self
 
 	@classmethod
-	def verify_reserved_use(cls, data: dict):
+	def verify_reserved_use(cls, data: Dict) -> None:
 		if set(data.keys()) & cls._RESERVED_KEYS:
 			raise ReservedKeyError()
 
 	@classmethod
-	def error_from_exc(cls, exc: BaseException):
+	def error_from_exc(cls, exc: BaseException) -> 'Message':
 		if isinstance(exc, RouterError):
 			error_data = exc.error_data.copy()
 
@@ -83,7 +83,7 @@ class Message(object):
 
 		return Message(success=False, error=str(exc), error_data={'data': repr(exc)})
 
-	def _render_tags(self):
+	def _render_tags(self) -> List[str]:
 		tags = []
 
 		if self.success is not None:
@@ -94,14 +94,14 @@ class Message(object):
 
 		return tags
 
-	def __str__(self):
+	def __str__(self) -> str:
 		tags = ' '.join(self._render_tags())
 		return f'Message({tags}): {self.data!r}'
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		return str(self)
 
-	def extend(self, **kwargs):
+	def extend(self, **kwargs: Any) -> 'Message':
 		self.data.update(**kwargs)
 		return self
 
@@ -111,7 +111,7 @@ class Message(object):
 
 		return copy
 
-	def json(self, **extra) -> str:
+	def json(self, **extra: Any) -> str:
 		payload = {
 			**self.data,
 			**extra,

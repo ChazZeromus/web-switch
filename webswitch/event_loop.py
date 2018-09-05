@@ -14,26 +14,20 @@ class EventLoopThread(threading.Thread):
 	event_loop_thread_latest_id = 0
 
 	def __init__(
-			self,
-			init_async_func: Callable = None,
-			shutdown_async_func: Callable = None,
-			loop: asyncio.AbstractEventLoop = None,
-			executor: futures.Executor = None,
-			group=None,
-			target=None,
-			name=None, *,
-			daemon=None) -> None:
-
+		self,
+		init_async_func: Optional[Callable] = None,
+		shutdown_async_func: Optional[Callable] = None,
+		loop: Optional[asyncio.AbstractEventLoop] = None,
+		executor: Optional[futures.Executor] = None,
+		*, daemon: bool = False
+	) -> None:
 		EventLoopThread.event_loop_thread_latest_id += 1
-		self.id = EventLoopThread.event_loop_thread_latest_id
+		self.id: int = EventLoopThread.event_loop_thread_latest_id
 
 		self.logger = g_logger.getChild(f'EventLoopThread:{self.id}')
 		self.logger.debug('Creating EventLoopThread')
 
 		super(EventLoopThread, self).__init__(
-			group=group,
-			target=target,
-			name=name,
 			args=(),
 			kwargs={},
 			daemon=daemon

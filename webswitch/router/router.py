@@ -151,7 +151,7 @@ class Router(object):
 			self.__logger.info('Waiting for websocket server to die')
 			await server.wait_closed()
 
-		loop_thread = EventLoopThread(
+		loop_thread: EventLoopThread = EventLoopThread(
 			loop=self.event_loop,
 			init_async_func=async_init_callback,
 			shutdown_async_func=async_shutdown_callback,

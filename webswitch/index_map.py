@@ -11,7 +11,7 @@ class IndexMap(Generic[T]):
 		}
 		self._inverse_indexes: Dict[T, Dict[str, Any]] = {}
 
-	def add(self, item: T, **kwargs: Any):
+	def add(self, item: T, **kwargs: Any) -> None:
 		if item in self._items:
 			raise Exception(f'Active {item!r} already exists')
 
@@ -34,13 +34,13 @@ class IndexMap(Generic[T]):
 
 		self._items.add(item)
 
-	def __len__(self):
+	def __len__(self) -> int:
 		return len(self._items)
 
-	def __bool__(self):
+	def __bool__(self) -> bool:
 		return bool(self._items)
 
-	def remove(self, item: T):
+	def remove(self, item: T) -> None:
 		if item not in self._items:
 			raise Exception(f'Active {item!r} does not exist')
 
