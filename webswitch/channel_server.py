@@ -1,8 +1,9 @@
 import re
-from typing import *
+from typing import Any, Optional, Union, Tuple, Dict, Type, Set, List
 import traceback
 import uuid
 import argparse
+import asyncio
 
 from .logger import g_logger
 from .dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
@@ -17,18 +18,24 @@ import logging
 
 
 class ChannelServerError(RouterError):
-	def __init__(self, message: str, **data) -> None:
+	def __init__(self, message: str, **data: Any) -> None:
 		super(ChannelServerError, self).__init__('channel_error', message=message, **data)
 
 
 class ChannelServerActionError(ChannelServerError):
-	def __init__(self, message: str, **data) -> None:
+	def __init__(self, message: str, **data: Any) -> None:
 		super(ChannelServerActionError, self).__init__(message, **data)
 		self.error_types.append('channel_action_error')
 
 
 class ChannelServerResponseError(RouterResponseError):
-	def __init__(self, message: str, response: Optional[Union[uuid.UUID, 'AwaitDispatch']], orig_exc: Exception = None, **data) -> None:
+	def __init__(
+		self,
+		message: str,
+		response: Optional[Union[uuid.UUID, 'AwaitDispatch']],
+		orig_exc: Optional[Exception] = None,
+		**data: str
+	) -> None:
 		new_data = dict(data)
 
 		if orig_exc:
@@ -41,33 +48,33 @@ class ChannelServerResponseError(RouterResponseError):
 			self.set_guid(self, response)
 
 	@staticmethod
-	def set_guid(exception: RouterError, response: Union[uuid.UUID, 'AwaitDispatch']):
+	def set_guid(exception: RouterError, response: Union[uuid.UUID, 'AwaitDispatch']) -> None:
 		exception.error_data['response_id'] = response
 
 
 # TODO: Create a ChannelClient class that can have multiple Connections
 class ChannelClient(object):
-	def __init__(self, channel: 'ChannelServer', conn: Connection, **kwargs) -> None:
+	def __init__(self, channel: 'ChannelServer', conn: Connection) -> None:
 		self.channel = channel
 		self.conns = [conn]
 		self.name: Optional[str] = None
 		self._room_key: Optional[Tuple[str, str]] = None
 
-		self.id = channel.get_next_client_id()
+		self.id: int = channel.get_next_client_id()
 
 		self.logger = channel.get_logger().getChild(f'ChannelClient:{self.id}')
 		self.logger.debug(f'Created channel client {self!r}')
 
-	def get_room_key(self):
+	def get_room_key(self) -> Tuple[str, str]:
 		if not self._room_key:
 			raise ChannelServerError('No room key to retrieve')
 
 		return self._room_key
 
-	def set_room_key(self, key: Tuple[str, str]):
+	def set_room_key(self, key: Tuple[str, str]) -> None:
 		self._room_key = key
 
-	async def send(self, message: Union[Message, Dict], response_id: Optional[uuid.UUID]):
+	async def send(self, message: Union[Message, Dict], response_id: Optional[uuid.UUID]) -> None:
 		if isinstance(message, dict):
 			message = Message(data=message)
 
@@ -77,17 +84,17 @@ class ChannelClient(object):
 
 		await self.channel.send_messages(self.conns, message)
 
-	def try_send(self, message: Message, response_id: Optional[uuid.UUID]):
+	def try_send(self, message: Message, response_id: Optional[uuid.UUID]) -> None:
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
 		self.channel.try_send_messages(self.conns, message)
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		return f'ChannelClient(id:{self.id},conns:{len(self.conns)})'
 
-	def __str__(self):
+	def __str__(self) -> str:
 		return repr(self)
 
 
@@ -96,13 +103,18 @@ class Conversation(AbstractAwaitDispatch):
 		self.await_dispatch = original
 		self.client = client
 
-	def get_await_dispatch(self):
+	def get_await_dispatch(self) -> AwaitDispatch:
 		return self.await_dispatch
 
-	async def send(self, data: Union[Message, Dict]):
+	async def send(self, data: Union[Message, Dict]) -> None:
 		await self.client.send(data, self.await_dispatch.guid)
 
-	async def send_and_recv(self, data: Union[Message, Dict], expect_params: Dict[str, Type] = None, timeout: float = None):
+	async def send_and_recv(
+		self,
+		data: Union[Message, Dict],
+		expect_params: Optional[Dict[str, Type]] = None,
+		timeout: Optional[float] = None
+	) -> Any:
 		await self.send(data)
 		return await self(params=expect_params, timeout=timeout)
 
@@ -150,11 +162,11 @@ class ChannelServer(Router):
 	def get_logger(self) -> logging.Logger:
 		return self.logger
 
-	def get_next_client_id(self):
+	def get_next_client_id(self) -> int:
 		self.last_client_id += 1
 		return self.last_client_id
 
-	def argument_hook(self, args: Dict[str, Any], source: object, action: Action) -> Dict:
+	def argument_hook(self, args: Dict[str, Any], source: object, action: Action) -> Dict[str, Any]:
 		assert isinstance(source, ChannelClient)
 
 		await_dispatch: Optional[AwaitDispatch] = args.get('await_dispatch')
@@ -210,13 +222,13 @@ class ChannelServer(Router):
 			self.logger.info(f'Removed last connection of {client!r}, removed client and cancelling actions')
 			self.dispatcher.cancel_action_by_source(client)
 
-	def on_start(self):
+	def on_start(self) -> None:
 		self.dispatcher.start()
 
-	def on_stop(self):
+	def on_stop(self) -> None:
 		self.dispatcher.stop(self.stop_timeout)
 
-	def stop_serve(self, timeout: float = None):
+	def stop_serve(self, timeout: Optional[float] = None) -> None:
 		self.stop_timeout = timeout
 		super(ChannelServer, self).stop_serve()
 
@@ -252,10 +264,10 @@ class ChannelServer(Router):
 		except Exception as e:
 			connection.close(reason=str(e))
 
-	def on_remove(self, connection: Connection):
+	def on_remove(self, connection: Connection) -> None:
 		self.handle_remove_connection(connection)
 
-	def on_message(self, connection: Connection, message: Message):
+	def on_message(self, connection: Connection, message: Message) -> None:
 		action_name = message.data.get('action')
 		client = self._get_client(connection)
 
@@ -284,7 +296,7 @@ class ChannelServer(Router):
 			self.logger.error(f'dispatch error: {e!r}\n{traceback.format_exc()}')
 			raise ChannelServerError(f'Unexpected error performing action: {e!r}')
 
-	def _get_client(self, connection: Connection):
+	def _get_client(self, connection: Connection) -> ChannelClient:
 		client = self.conn_to_client.get(connection)
 
 		if not client:
@@ -294,7 +306,13 @@ class ChannelServer(Router):
 		return client
 
 	# Define our exception handler for actions so we can notify client of the error for the particular response_id.
-	async def action_exception_handler(self, source: object, action_name: str, e: Exception, response_id: uuid.UUID):
+	async def action_exception_handler(
+		self,
+		source: object,
+		action_name: str,
+		e: Exception,
+		response_id: uuid.UUID
+	) -> None:
 		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
 
 		assert isinstance(source, ChannelClient)
@@ -309,7 +327,7 @@ class ChannelServer(Router):
 		source.try_send(Message.error_from_exc(e), response_id)
 
 	# Define our completer when actions complete and return
-	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID):
+	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID) -> None:
 		assert isinstance(source, ChannelClient)
 
 		if isinstance(result, Dict):
@@ -318,11 +336,11 @@ class ChannelServer(Router):
 			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
 
 	@add_action()
-	def action_whoami(self, client: ChannelClient):
+	def action_whoami(self, client: ChannelClient) -> Dict:
 		return {'id': client.id}
 
 	@add_action(params={'targets': list, 'data': dict})
-	async def action_send(self, convo: Conversation, targets: List[int], data: dict, client: ChannelClient):
+	async def action_send(self, convo: Conversation, targets: List[int], data: dict, client: ChannelClient) -> None:
 		this_key = client.get_room_key()
 		target_clients: List[ChannelClient] = []
 
@@ -341,12 +359,12 @@ class ChannelServer(Router):
 			client_.try_send(message, response_id=None)
 
 	@add_action()
-	def action_enum_clients(self, client: ChannelClient):
+	def action_enum_clients(self, client: ChannelClient) -> Dict:
 		clients = self.rooms[client.get_room_key()]
 		return {'client_ids': list(map(lambda c: c.id, clients))}
 
 
-def cli_main():
+def cli_main() -> None:
 	parser = argparse.ArgumentParser(
 		description='Websocket channel-style server',
 		formatter_class=argparse.ArgumentDefaultsHelpFormatter,

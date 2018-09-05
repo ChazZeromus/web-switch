@@ -47,29 +47,29 @@ class EventLoopThread(threading.Thread):
 
 		self.init_event = threading.Event()
 
-		self.exception_traceback = None
-		self.exception = None
-		self.result = None
+		self.exception_traceback: Optional[str] = None
+		self.exception: Optional[BaseException] = None
+		self.result: Optional[bool] = None
 
 		self._init_async_func = init_async_func
 		self._shutdown_async_func = shutdown_async_func
 
-	def create_queue(self):
+	def create_queue(self) -> None:
 		self._queue_factory()
 
-	async def run_init_async(self):
+	async def run_init_async(self) -> bool:
 		self.logger.debug('Running init_async')
 		if self._init_async_func:
 			return await asyncio.ensure_future(self._init_async_func(), loop=self.event_loop)
 		return True
 
-	async def run_shutdown_async(self):
+	async def run_shutdown_async(self) -> bool:
 		self.logger.debug('Running shutdown_async')
 		if self._shutdown_async_func:
 			return await asyncio.ensure_future(self._shutdown_async_func(), loop=self.event_loop)
 		return True
 
-	def run(self):
+	def run(self) -> None:
 		self.logger.debug('Thread started')
 		self.exception = None
 		self.result = None
@@ -97,11 +97,11 @@ class EventLoopThread(threading.Thread):
 			self.event_loop.close()
 			self.logger.debug('Calling event_loop.close()')
 
-	def join(self, timeout: Optional[float] = None):
+	def join(self, timeout: Optional[float] = None) -> None:
 		self.logger.debug('Joining thread')
 		super(EventLoopThread, self).join(timeout=timeout)
 
-	def wait_result(self):
+	def wait_result(self) -> bool:
 		self.logger.debug('Waiting on init_async result')
 
 		self.init_event.wait()
@@ -112,9 +112,11 @@ class EventLoopThread(threading.Thread):
 
 		self.logger.debug(f'Retrieved result from init_async: {self.result!r}')
 
+		assert self.result is not None
+
 		return self.result
 
-	def shutdown_loop(self):
+	def shutdown_loop(self) -> None:
 		self.logger.debug('Calling shutdown_loop()')
 		# Get all uncompleted tasks to wait on, noteworthy that we're calling this
 		# before calling func() and creating it as a task as to not wait for itself
@@ -138,8 +140,8 @@ class EventLoopThread(threading.Thread):
 		self.logger.info('Shutting down event loop thread')
 		self.event_loop.call_soon_threadsafe(self.event_loop.stop)
 
-	def run_coroutine_threadsafe(self, coro) -> futures.Future:
+	def run_coroutine_threadsafe(self, coro: Coroutine) -> futures.Future:
 		return asyncio.run_coroutine_threadsafe(coro, loop=self.event_loop)
 
-	def call_soon_threadsafe(self, callback, *args):
+	def call_soon_threadsafe(self, callback: Callable, *args: Any) -> asyncio.Handle:
 		return self.event_loop.call_soon_threadsafe(callback, *args)

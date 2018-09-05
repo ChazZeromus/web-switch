@@ -90,14 +90,14 @@ class Router(object):
 
 		self._close_lock = threading.Lock()
 
-	def get_logger(self):
+	def get_logger(self) -> logging.Logger:
 		"""
 		Gets logger for this Router instance. Useful for subclasses.
 		:return:
 		"""
 		return self.__logger
 
-	def serve(self, *, daemon=False, block_until_ready=True):
+	def serve(self, *, daemon: bool = False, block_until_ready: bool = True) -> None:
 		"""
 		Starts websocket router.
 		:param daemon: Whether or not to immediately return. If not then this function blocks
@@ -124,7 +124,7 @@ class Router(object):
 
 		self.__logger.info('Start completed')
 
-	def stop_serve(self):
+	def stop_serve(self) -> None:
 		"""
 		Signal the termination of the websocket server and block until the background thread finishes.
 		:return:
@@ -134,18 +134,18 @@ class Router(object):
 		self._server_thread.join()
 		self.__logger.info('Stop completed')
 
-	def _serve_forever(self):
+	def _serve_forever(self) -> None:
 		self._interrupt_event.clear()
 
 		asyncio.set_event_loop(self.event_loop)
 		serve_task = websockets.serve(self.handle_connect, self.host, self.port)
 		server = serve_task.ws_server
 
-		async def async_init_callback():
+		async def async_init_callback() -> bool:
 			await serve_task
 			return True
 
-		async def async_shutdown_callback():
+		async def async_shutdown_callback() -> None:
 			self.__logger.info('Shutting down socket server')
 			server.close()
 			self.__logger.info('Waiting for websocket server to die')
@@ -225,13 +225,13 @@ class Router(object):
 
 		self.__logger.info('Socket server shutdown.')
 
-	def _is_closed(self):
+	def _is_closed(self) -> bool:
 		with self._close_lock:
 			return self.closed
 
-	def _set_closed(self):
+	def _set_closed(self) -> None:
 		with self._close_lock:
-			return self.closed
+			self.closed = True
 
 	async def handle_connect(self, websocket: WebSocketServerProtocol, path: str) -> None:
 		if self._is_closed():
@@ -325,9 +325,10 @@ class Router(object):
 			raise
 
 	async def send_messages(
-			self,
-			recipients: List[Connection],
-			message: Message) -> List:
+		self,
+		recipients: List[Connection],
+		message: Message
+	) -> Iterable:
 		payload = message.json()
 
 		gens = []
@@ -336,13 +337,13 @@ class Router(object):
 			self.__logger.debug(f'Sending data {message!r} to {conn!r}')
 			gens.append(conn.ws.send(payload))
 
-		return await asyncio.gather(
+		return cast(Iterable, await asyncio.gather(
 			*gens,
 			return_exceptions=True,
-		)
+		))
 
 	def try_send_messages(self, recipients: List[Connection], message: Message) -> None:
-		async def _async_call():
+		async def _async_call() -> None:
 			results = await self.send_messages(recipients, message)
 
 			errors = []
@@ -367,16 +368,16 @@ class Router(object):
 
 		asyncio.run_coroutine_threadsafe(_async_call(), self.event_loop)
 
-	def on_stop(self):
+	def on_stop(self) -> None:
 		pass
 
-	def on_start(self):
+	def on_start(self) -> None:
 		pass
 
 	def on_new(self, connection: Connection, path: str) -> None:
 		pass
 
-	def on_message(self, connection: Connection, message: Message):
+	def on_message(self, connection: Connection, message: Message) -> None:
 		pass
 
 	def on_remove(self, connection: Connection) -> None:
