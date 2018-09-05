@@ -1,4 +1,2 @@
 websockets==6.0
-pytest==3.6.3
-pytest-asyncio==0.8.0
 dataclasses==0.6
