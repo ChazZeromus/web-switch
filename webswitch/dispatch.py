@@ -329,7 +329,7 @@ class ResponseDispatcher(object):
 			if missing_params:
 				raise Exception(
 					f'Could not init ResponseDispatcher due to missing arguments {missing_params}'
-					f' in action {action.name!r}'
+					f' in action {orig_action.name!r}'
 				)
 
 			action: Action = orig_action.clone()
