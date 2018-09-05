@@ -213,3 +213,5 @@ Fix DispatchNotStarted errors
     Since the router handles connections, is it okay that we stop the dispatcher before connection cleanup? Ideally
     connection cleanup before stopping the dispatcher but on_stop() where stop_serve() is called is called immediately
     when a stop is requested. I suppose it's fine for now.
+
+Find all usages of format-string formatters in strings that aren't format strings
