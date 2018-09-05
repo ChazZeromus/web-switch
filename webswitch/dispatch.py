@@ -464,7 +464,6 @@ class ResponseDispatcher(object):
 			# TODO: both have .handle() methods, we could type that attribute as a Cancellabled or something.
 			def create_timeout_callback():
 				self.logger.debug(f'Also awaiting response with timeout of {timeout}')
-				asyncio.sleep(timeout)
 				timeout_future = asyncio.ensure_future(async_timeout(), loop=self.loop_thread.event_loop)
 				await_dispatch.set_timeout_future(timeout_future)
 
