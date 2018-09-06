@@ -12,7 +12,7 @@ from .common import *
 
 class ClientTestingServer(ChannelServerBase):
 	@add_action(params={'arg': str})
-	async def action_test_conversation(self, arg: str, client: 'ChannelClient', convo: Conversation):
+	async def action_test_conversation(self, arg: str, client: 'ChannelClient', convo: Conversation) -> None:
 
 		response = await convo.send_and_recv({'foo1': f'You said {arg}', 'foo2': f'is {arg}'})
 
@@ -28,25 +28,25 @@ class ClientTestingServer(ChannelServerBase):
 		assert arg == 4, 'Incorrect response'
 
 	@add_action()
-	async def action_async_raise(self, client: 'ChannelClient', convo: Conversation):
+	async def action_async_raise(self, client: 'ChannelClient', convo: Conversation) -> None:
 		raise RouterError(error_types='foo', message='something happened!')
 
 	@add_action(params={'timeout': float})
-	async def action_client_timeout_test(self, timeout: float, client: 'ChannelClient', convo: Conversation):
+	async def action_client_timeout_test(self, timeout: float, client: 'ChannelClient', convo: Conversation) -> None:
 		await async_sleep(timeout)
 		await convo.send({'data': 'all done!'})
 
 
 @pytest.fixture(name='get_server', scope='function')
-def get_server_fixture(free_port) -> Callable[[], ClientTestingServer]:
-	def func():
+def get_server_fixture(free_port: int) -> Callable[[], ClientTestingServer]:
+	def func() -> ClientTestingServer:
 		return ClientTestingServer(free_port)
 
 	return func
 
 
 @pytest.mark.asyncio
-async def test_whoami(client_with_server):
+async def test_whoami(client_with_server: Client) -> None:
 	convo = client_with_server.convo('whoami')
 
 	reply = await convo.send_and_expect({})
@@ -58,7 +58,7 @@ async def test_whoami(client_with_server):
 
 
 @pytest.mark.asyncio
-async def test_async_raise(client_with_server: Client):
+async def test_async_raise(client_with_server: Client) -> None:
 	convo = client_with_server.convo('async_raise')
 
 	with pytest.raises(ResponseException) as excinfo:
@@ -68,7 +68,7 @@ async def test_async_raise(client_with_server: Client):
 
 
 @pytest.mark.asyncio
-async def test_convo(client_with_server: Client):
+async def test_convo(client_with_server: Client) -> None:
 	convo = client_with_server.convo('test_conversation')
 	response = await convo.send_and_expect({'arg': 'yo'})
 
@@ -83,14 +83,14 @@ async def test_convo(client_with_server: Client):
 
 
 @pytest.mark.asyncio
-async def test_client_timeout(client_with_server: Client):
+async def test_client_timeout(client_with_server: Client) -> None:
 	convo = client_with_server.convo('client_timeout_test')
 
 	with pytest.raises(ResponseTimeoutException) as excinfo:
 		await convo.send_and_expect({'timeout': 0.2}, timeout=0.1)
 
 @pytest.mark.asyncio
-async def test_unknown_action(client_with_server: Client):
+async def test_unknown_action(client_with_server: Client) -> None:
 	convo = client_with_server.convo('this_action_is_fake')
 
 	with pytest.raises(ResponseException) as excinfo:
@@ -101,7 +101,7 @@ async def test_unknown_action(client_with_server: Client):
 
 @pytest.mark.parametrize("count", [10, 5])
 @pytest.mark.asyncio
-async def test_enum(count: int, get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+async def test_enum(count: int, get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]) -> None:
 	with get_server() as server:
 		clients = []
 
@@ -135,7 +135,7 @@ async def test_enum(count: int, get_client: Callable[[], Client], get_server: Ca
 
 
 @pytest.mark.asyncio
-async def test_send(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]):
+async def test_send(get_client: Callable[[], Client], get_server: Callable[[], ClientTestingServer]) -> None:
 	with get_server():
 		async with get_client() as client1, get_client() as client2:
 			await client1.convo('send').send({

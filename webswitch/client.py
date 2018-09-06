@@ -195,7 +195,7 @@ class Client:
 
 		return self
 
-	async def __aexit__(self, exc_type: Optional[BaseException], exc_val: Any, exc_tb: TracebackType) -> None:
+	async def __aexit__(self, exc_type: Optional[BaseException], exc_val: Any, exc_tb: Optional[TracebackType]) -> None:
 		if not self._loop_fut:
 			raise Exception('Cannot async-exit when client never entered')
 

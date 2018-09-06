@@ -1,7 +1,9 @@
 import fnmatch
 import socket
 import time
+from types import TracebackType
 from contextlib import closing
+from types import TracebackType
 from typing import *
 
 import pytest
@@ -17,18 +19,26 @@ class ChannelServerBase(ChannelServer):
 	def __init__(self, port: int) -> None:
 		super(ChannelServerBase, self).__init__('localhost', port)
 
-	def __enter__(self):
+	def __enter__(self) -> 'ChannelServerBase':
 		self.serve(daemon=True)
 		return self
 
-	def __exit__(self, exc_type, exc_val, exc_tb):
+	def __exit__(self, exc_type: Optional[BaseException], exc_val: Any, exc_tb: TracebackType) -> None:
 		self.stop_serve()
 
 # TODO: raise NotImplement() version of get_server should be defined here?
 
 
+@pytest.fixture(name='get_server', scope='function')
+def get_server_fixture(free_port: int) -> Callable[[], ChannelServerBase]:
+	raise NotImplemented('Must override this fixture in module')
+
+
 @pytest.fixture(scope='function')
-async def client_with_server(get_client, get_server):
+async def client_with_server(
+	get_client: Callable[[], Client],
+	get_server: Callable[[], ChannelServerBase]
+) -> AsyncIterable[Client]:
 	with get_server():
 		async with get_client() as client:
 			yield client
@@ -36,8 +46,8 @@ async def client_with_server(get_client, get_server):
 
 def filter_records(
 		records: Iterable[Tuple[str, str, str]],
-		name_pattern: str = None,
-		msg_pattern: str = None,
+		name_pattern: Optional[str] = None,
+		msg_pattern: Optional[str] = None,
 ) -> List[Tuple[str, str, str]]:
 	filtered = []
 	for name, level, msg in records:
@@ -52,7 +62,7 @@ def filter_records(
 	return filtered
 
 
-def find_free_port():
+def find_free_port() -> int:
 	global PORT
 
 	if PORT:
@@ -60,17 +70,17 @@ def find_free_port():
 
 	with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
 		s.bind(('', 0))
-		return s.getsockname()[1]
+		return cast(Tuple[Any, int], s.getsockname())[1]
 
 
 @pytest.fixture(scope='session')
-def free_port():
+def free_port() -> int:
 	return find_free_port()
 
 
 @pytest.fixture(scope='function')
-def get_client(free_port):
-	def func():
+def get_client(free_port: int) -> Callable[[], Client]:
+	def func() -> Client:
 		return Client(f'ws://{HOSTNAME}:{free_port}/foo/bar')
 
 	return func
@@ -92,7 +102,7 @@ class TimeBox(object):
 		return self._elapsed
 
 	@property
-	def within_timelimit(self):
+	def within_timelimit(self) -> bool:
 		assert self._elapsed is not None
 		return self._elapsed < self._timelimit - self._slack
 
@@ -100,7 +110,7 @@ class TimeBox(object):
 		self._start = time.monotonic()
 		return self
 
-	def __exit__(self, exc_type, exc_val, exc_tb):
+	def __exit__(self, exc_type: Optional[BaseException], exc_val: Any, exc_tb: TracebackType) -> None:
 		assert self._start is not None
 		self._elapsed = time.monotonic() - self._start
 
