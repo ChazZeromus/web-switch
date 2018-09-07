@@ -1,17 +1,17 @@
 import itertools
 import time
 import uuid
-from typing import NamedTuple
+from typing import NamedTuple, List
 
 from webswitch.client import MessageQueues
 from webswitch.index_map import IndexMap
 from webswitch.message import Message
 
 
-def test_message_queue():
+def test_message_queue() -> None:
 	mq = MessageQueues(10)
 
-	uuids = [
+	uuids: List[uuid.UUID] = [
 		uuid.UUID('2e29fa61-13c9-4583-b09b-9247eff7e55f'),
 		uuid.UUID('65d999cc-db56-46e0-b78f-332b3d3d7106'),
 		uuid.UUID('c39aea80-ac5d-4486-80fe-3aa9a199d54c'),
@@ -53,17 +53,21 @@ def test_message_queue():
 
 	mq.remove_oldest(0.49)
 
-	assert set(mq.get_messages(uuids[0])) == set(messages[1:3]) - {old_msg}
+	first = mq.get_messages(uuids[0])
+
+	assert first
+	assert set(first) == set(messages[1:3]) - {old_msg}
 
 
-def test_index_map():
-	class Item(NamedTuple):
-		a: int
-		b: str
+class Item(NamedTuple):
+	a: int
+	b: str
 
+
+def test_index_map() -> None:
 	im: IndexMap[Item] = IndexMap('a', 'b', 'c')
 
-	items = [
+	items: List[Item] = [
 		Item(a=1, b='foo'),
 		Item(a=2, b='bar'),
 		Item(a=3, b='bar'),

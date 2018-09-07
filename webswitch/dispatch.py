@@ -1,5 +1,5 @@
 
-from typing import Dict, Any, Optional, Callable, List, Type, Iterable, Union, Coroutine, NamedTuple
+from typing import Dict, Any, Optional, Callable, List, Type, Iterable, Union, Coroutine, NamedTuple, TypeVar
 from threading import Lock
 import asyncio
 import uuid
@@ -748,13 +748,16 @@ class ResponseDispatcher(object):
 			)
 
 
+T = TypeVar('T', bound=Callable)
+
+
 def add_action(
 	action_name: Optional[str] = None,
 	exclusive_async: bool = True,
 	params: Optional[Dict[str, Type]] = None,
 	intrinsic_params: Iterable[str] = (),
 	timeout: Optional[float] = None,
-) -> Callable:
+) -> Callable[[T], T]:
 	"""
 	Decorator to add actions from methods. This decorator MUST be called with
 	an argument list, even if empty.
@@ -769,7 +772,7 @@ def add_action(
 	:return:
 	"""
 
-	def decorator(func: Callable) -> Callable:
+	def decorator(func: T) -> T:
 		nonlocal params, action_name
 
 		params = params or {}

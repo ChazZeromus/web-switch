@@ -2,6 +2,7 @@ import logging
 import pytest
 from threading import Thread, Event
 from asyncio import sleep as async_sleep, new_event_loop
+from typing import Iterable, Optional, List, Callable, Dict, Any
 
 from .common import *
 from webswitch.channel_server import Conversation, add_action, ChannelClient
@@ -10,52 +11,56 @@ from webswitch.message import Message
 
 
 class UniqueError(Exception):
-	def __init__(self):
+	def __init__(self) -> None:
 		super(UniqueError, self).__init__('unique', 'UniqueError')
 
 
 class ServerTestingServer(ChannelServerBase):
 	@add_action()
-	async def action_server_timeout_test(self, client: 'ChannelClient', convo: Conversation):
+	async def action_server_timeout_test(self, client: 'ChannelClient', convo: Conversation) -> None:
 		await convo.send_and_recv({'data': 'yo'}, timeout=0.1)
 
 	@add_action(params={'timeout': float})
-	async def action_timeout(self, timeout: float, client: 'ChannelClient', convo: Conversation):
+	async def action_timeout(self, timeout: float, client: 'ChannelClient', convo: Conversation) -> None:
 		await convo.send({'confirmed': True})
 		await async_sleep(timeout)
 
 	@add_action()
-	def action_raise_unique_error(self, client: 'ChannelClient'):
+	def action_raise_unique_error(self, client: 'ChannelClient') -> None:
 		raise UniqueError()
 
 	@add_action()
-	async def action_raise_unique_error_async(self, client: 'ChannelClient', convo: Conversation):
+	async def action_raise_unique_error_async(self, client: 'ChannelClient', convo: Conversation) -> None:
 		raise UniqueError()
 
 	@add_action()
-	async def action_async_return(self, convo: Conversation, client: 'ChannelClient') -> dict:
+	async def action_async_return(self, convo: Conversation, client: 'ChannelClient') -> Dict:
 		return {'data': 'hello a little later!'}
 
 	@add_action()
-	def action_nonasync_return(self, client: 'ChannelClient') -> dict:
+	def action_nonasync_return(self, client: 'ChannelClient') -> Dict:
 		return {'data': 'hello right now!'}
 
 	@add_action()
-	async def action_send_error_and_continue(self, convo: Conversation, client: 'ChannelClient'):
+	async def action_send_error_and_continue(self, convo: Conversation, client: 'ChannelClient') -> None:
 		response = await convo.send_and_recv(Message({'msg': 'give me nothing'}, error='some error'))
 		raise Exception('Not suppose to receive a response!')
 
 
-@pytest.fixture(scope='function')
-def get_server(free_port):
-	def func():
+@pytest.fixture(name='get_server', scope='function')
+def get_server_fixture(free_port: int) -> Callable[[], ServerTestingServer]:
+	def func() -> ServerTestingServer:
 		return ServerTestingServer(free_port)
 
 	return func
 
 
 @pytest.mark.asyncio
-async def test_response_dispatch_timeout(get_server, get_client, caplog):
+async def test_response_dispatch_timeout(
+	get_server: Callable[[], ServerTestingServer],
+	get_client: Callable[[], Client],
+	caplog: Any
+) -> None:
 	server = get_server()
 	server.serve(daemon=True)
 
@@ -84,7 +89,11 @@ async def test_response_dispatch_timeout(get_server, get_client, caplog):
 
 
 @pytest.mark.asyncio
-async def test_response_dispatch_no_cancel(get_server, get_client, caplog):
+async def test_response_dispatch_no_cancel(
+	get_server: Callable[[], ServerTestingServer],
+	get_client: Callable[[], Client],
+	caplog: Any
+) -> None:
 	server = get_server()
 	server.serve(daemon=True)
 
@@ -108,8 +117,13 @@ async def test_response_dispatch_no_cancel(get_server, get_client, caplog):
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='All AwaitDispatches finished')
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='All active dispatch actions finished')
 
+
 @pytest.mark.asyncio
-async def test_response_dispatch_do_cancel(get_server, get_client, caplog):
+async def test_response_dispatch_do_cancel(
+	get_server: Callable[[], ServerTestingServer],
+	get_client: Callable[[], Client],
+	caplog: Any
+) -> None:
 	server = get_server()
 	server.serve(daemon=True)
 
@@ -119,8 +133,8 @@ async def test_response_dispatch_do_cancel(get_server, get_client, caplog):
 	client_send_event = Event()
 	server_stop_event = Event()
 
-	def thread_main():
-		async def async_main():
+	def thread_main() -> None:
+		async def async_main() -> None:
 			async with get_client() as client:
 				convo = client.convo('timeout')
 				# Make sure stop_serve() timeout expires while server sleeps for 10 seconds
@@ -155,7 +169,7 @@ async def test_response_dispatch_do_cancel(get_server, get_client, caplog):
 	assert filter_records(caplog.record_tuples, name_pattern=name_pattern, msg_pattern='Cancelling * active dispatches *')
 
 @pytest.mark.asyncio
-async def test_unique_error_nonasync(client_with_server: Client):
+async def test_unique_error_nonasync(client_with_server: Client) -> None:
 	convo = client_with_server.convo('raise_unique_error')
 
 	with pytest.raises(ResponseException) as excinfo:
@@ -165,7 +179,7 @@ async def test_unique_error_nonasync(client_with_server: Client):
 
 
 @pytest.mark.asyncio
-async def test_unique_error_async(client_with_server: Client):
+async def test_unique_error_async(client_with_server: Client) -> None:
 	convo = client_with_server.convo('raise_unique_error_async')
 
 	with pytest.raises(ResponseException) as excinfo:
@@ -175,7 +189,7 @@ async def test_unique_error_async(client_with_server: Client):
 
 
 @pytest.mark.asyncio
-async def test_server_timeout(client_with_server: Client):
+async def test_server_timeout(client_with_server: Client) -> None:
 	convo = client_with_server.convo('server_timeout_test')
 
 	with pytest.raises(ResponseException) as excinfo:
@@ -191,20 +205,26 @@ async def test_server_timeout(client_with_server: Client):
 
 	assert excinfo.value.data.get('exc_class') == 'DispatchAwaitTimeout', 'Timeout server exception class'
 
+
 @pytest.mark.asyncio
-async def test_async_return(client_with_server: Client):
+async def test_async_return(client_with_server: Client) -> None:
 	message = await client_with_server.convo('async_return').send_and_expect({})
 	assert 'data' in message.data
 	assert 'later' in message.data['data']
 
+
 @pytest.mark.asyncio
-async def test_nonasync_return(client_with_server: Client):
+async def test_nonasync_return(client_with_server: Client) -> None:
 	message = await client_with_server.convo('nonasync_return').send_and_expect({})
 	assert 'data' in message.data
 	assert 'now' in message.data['data']
 
+
 @pytest.mark.asyncio
-async def test_client_error(get_server, get_client):
+async def test_client_error(
+	get_server: Callable[[], ServerTestingServer],
+	get_client: Callable[[], Client]
+) -> None:
 	# When client disconnects due to an exception like an error sent to it from the server and the in-flight action
 	# is expecting a response, that action needs to immediately cancel.
 	server: ServerTestingServer = get_server()
