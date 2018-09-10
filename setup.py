@@ -21,6 +21,7 @@ setup(
 	author='Chaz Zeromus',
 	author_email='chaz.zeromus@gmail.com',
 	packages=find_packages('.', exclude=['tests']),
+	package_data={'webswitch': 'py.typed'},
 	install_requires=depends,
 	entry_points=entry_points,
 )
