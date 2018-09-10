@@ -27,3 +27,4 @@ yarn-error.log*
 .mypy_cache
 
 **.pyc
+*.egg-info
