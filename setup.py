@@ -1,8 +1,6 @@
 import os
 from setuptools import setup
 
-# This is a stub-only package as detailed in PEP-0561
-
 name = 'webswitch'
 package = 'webswitch'
 description = 'Channel-style websocket server'
