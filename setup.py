@@ -22,7 +22,7 @@ setup(
 	author_email='chaz.zeromus@gmail.com',
 	packages=find_packages('.', exclude=['tests']),
 	package_dir={'webswitch': 'webswitch'},
-	package_data={'webswitch': 'py.typed'},
+	package_data={'webswitch': ['py.typed']},
 	install_requires=depends,
 	entry_points=entry_points,
 )
