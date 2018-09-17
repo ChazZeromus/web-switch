@@ -15,7 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .connection import Connection, ConnectionList
 from .errors import RouterError, RouterConnectionError, RouterServerError
-from ..event_loop import EventLoopThread
+from ..event_loop import EventLoopManager
 from ..message import Message
 from ..logger import g_logger
 
@@ -151,12 +151,12 @@ class Router(object):
 			self.__logger.info('Waiting for websocket server to die')
 			await server.wait_closed()
 
-		loop_thread: EventLoopThread = EventLoopThread(
+		event_manager: EventLoopManager = EventLoopManager(
 			loop=self.event_loop,
 			init_async_func=async_init_callback,
 			shutdown_async_func=async_shutdown_callback,
 		)
-		loop_thread.start()
+		event_manager.start()
 
 		main_thread = threading.Thread(
 			target=_route_thread,
@@ -173,9 +173,9 @@ class Router(object):
 		success = False
 
 		try:
-			success = loop_thread.wait_result()
+			success = event_manager.wait_result()
 		except Exception as e:
-			self.__logger.error(f'{loop_thread.exception_traceback}\nCould not start server: {e!r}')
+			self.__logger.error(f'{event_manager.exception_traceback}\nCould not start server: {e!r}')
 		finally:
 			self._ready_event.set()
 
@@ -187,7 +187,7 @@ class Router(object):
 
 			self.on_stop()
 		else:
-			self.__logger.error(f'{loop_thread.exception_traceback} Could not start server!')
+			self.__logger.error(f'{event_manager.exception_traceback} Could not start server!')
 
 		# Mark router as closed so new connections are dropped in the meantime
 		self._set_closed()
@@ -220,8 +220,8 @@ class Router(object):
 
 		main_thread.join()
 
-		loop_thread.shutdown_loop()
-		loop_thread.join()
+		event_manager.shutdown_loop()
+		event_manager.join()
 
 		self.__logger.info('Socket server shutdown.')
 

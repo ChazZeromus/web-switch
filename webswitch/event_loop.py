@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 import traceback
-from typing import *
+from typing import Any, Optional, Coroutine, Union, Type, Callable, TypeVar, Awaitable, cast
 from queue import Queue as thread_Queue
 from multiprocessing import Queue as mp_Queue
 import concurrent.futures as futures
@@ -10,24 +10,47 @@ import concurrent.futures as futures
 from .logger import g_logger
 
 
-class EventLoopThread(threading.Thread):
-	event_loop_thread_latest_id = 0
+InitReturn = TypeVar('InitReturn')
+ShutdownReturn = TypeVar('ShutdownReturn')
+
+
+class EventLoopManager(threading.Thread):
+	"""
+	A wrapper around asyncio event loops that provides two main boilerplate solutions:
+		- entry points for initialization and shutdown async code
+		- call forwarding into event loop
+
+	Both of which are thread-safe outside the event loop. Additionally the underlying
+	executor of the event loop can be started with a ProcessPoolExecutor and is
+	transparent to the manager as its role is simply a dedicated thread to run the
+	event loop.
+	"""
+	event_loop_manager_latest_id = 0
 
 	def __init__(
 		self,
-		init_async_func: Optional[Callable] = None,
-		shutdown_async_func: Optional[Callable] = None,
+		init_async_func: Optional[Callable[..., Awaitable[InitReturn]]] = None,
+		shutdown_async_func: Optional[Callable[..., Awaitable[ShutdownReturn]]] = None,
 		loop: Optional[asyncio.AbstractEventLoop] = None,
 		executor: Optional[futures.Executor] = None,
 		*, daemon: bool = False
 	) -> None:
-		EventLoopThread.event_loop_thread_latest_id += 1
-		self.id: int = EventLoopThread.event_loop_thread_latest_id
+		"""
+		:param init_async_func: Async function to run when event loop starts.
+		:param shutdown_async_func: Async function to run when event loop stops
+		       from `shutdown_loop()`
+		:param loop: Optional event loop for thread to manage. If None a new is
+		       created.
+		:param executor: An optional executor for the asyncio event_loop to use.
+		:param daemon: Whether the event loop thread is daemonized.
+		"""
+		EventLoopManager.event_loop_manager_latest_id += 1
+		self.id: int = EventLoopManager.event_loop_manager_latest_id
 
-		self.logger = g_logger.getChild(f'EventLoopThread:{self.id}')
-		self.logger.debug('Creating EventLoopThread')
+		self.logger = g_logger.getChild(f'EventLoopManager:{self.id}')
+		self.logger.debug('Creating EventLoopManager')
 
-		super(EventLoopThread, self).__init__(
+		super(EventLoopManager, self).__init__(
 			args=(),
 			kwargs={},
 			daemon=daemon
@@ -45,45 +68,57 @@ class EventLoopThread(threading.Thread):
 		if executor:
 			self.event_loop.set_default_executor(executor)
 
-		self.init_event = threading.Event()
+		self._init_event = threading.Event()
 
 		self.exception_traceback: Optional[str] = None
 		self.exception: Optional[BaseException] = None
-		self.result: Optional[bool] = None
+		self._result: Optional[InitReturn] = None
 
-		self._init_async_func = init_async_func
-		self._shutdown_async_func = shutdown_async_func
+		async def _noop_init() -> InitReturn:
+			return cast(InitReturn, True)
 
-	def create_queue(self) -> None:
-		self._queue_factory()
+		async def _noop_shutdown() -> ShutdownReturn:
+			return cast(ShutdownReturn, True)
 
-	async def run_init_async(self) -> bool:
+		self._init_async_func: Callable[..., Awaitable[InitReturn]] = init_async_func or _noop_init
+		self._shutdown_async_func: Callable[..., Awaitable[ShutdownReturn]] = shutdown_async_func or _noop_shutdown
+
+	async def _run_init_async(self) -> InitReturn:
 		self.logger.debug('Running init_async')
-		if self._init_async_func:
-			return await asyncio.ensure_future(self._init_async_func(), loop=self.event_loop)
-		return True
+		return await asyncio.ensure_future(
+			# TODO: Some weird mypy bug
+			cast(Awaitable[InitReturn], self._init_async_func()),
+			loop=self.event_loop
+		)
 
-	async def run_shutdown_async(self) -> bool:
+	async def _run_shutdown_async(self) -> ShutdownReturn:
 		self.logger.debug('Running shutdown_async')
-		if self._shutdown_async_func:
-			return await asyncio.ensure_future(self._shutdown_async_func(), loop=self.event_loop)
-		return True
+		return await asyncio.ensure_future(
+			# TODO: Some weird mypy bug
+			cast(Awaitable[ShutdownReturn], self._shutdown_async_func()),
+			loop=self.event_loop
+		)
 
 	def run(self) -> None:
+		"""
+		Starts event manager thread and runs async initialization function if one was provided.
+		After calling run, you can call `wait_result()` wait until initialization function is completed.
+		:return:
+		"""
 		self.logger.debug('Thread started')
 		self.exception = None
-		self.result = None
-		self.init_event.clear()
+		self._result = None
+		self._init_event.clear()
 
 		try:
-			self.result = self.event_loop.run_until_complete(self.run_init_async())
+			self._result = self.event_loop.run_until_complete(self._run_init_async())
 		except Exception as e:
 			self.logger.debug('Init async raised an exception')
 			self.exception_traceback = traceback.format_exc()
 			self.exception = e
 
 		self.logger.debug('Notifying of result')
-		self.init_event.set()
+		self._init_event.set()
 
 		self.logger.debug('Calling run_forever()')
 		self.event_loop.run_forever()
@@ -93,28 +128,37 @@ class EventLoopThread(threading.Thread):
 		self.event_loop.run_until_complete(self.event_loop.shutdown_asyncgens())
 
 		if self.exception is None:
-			self.event_loop.run_until_complete(self.run_shutdown_async())
+			self.event_loop.run_until_complete(self._run_shutdown_async())
 			self.event_loop.close()
 			self.logger.debug('Calling event_loop.close()')
 
 	def join(self, timeout: Optional[float] = None) -> None:
+		"""
+		Same as `Thread.join()`, should be called after shutdown_loop() is called.
+		:param timeout:
+		:return:
+		"""
 		self.logger.debug('Joining thread')
-		super(EventLoopThread, self).join(timeout=timeout)
+		super(EventLoopManager, self).join(timeout=timeout)
 
-	def wait_result(self) -> bool:
+	def wait_result(self) -> InitReturn:
+		"""
+		Blocks until initialization function has compeleted.
+		:return:
+		"""
 		self.logger.debug('Waiting on init_async result')
 
-		self.init_event.wait()
+		self._init_event.wait()
 
 		if self.exception:
 			self.logger.debug('Exception caught')
 			raise self.exception
 
-		self.logger.debug(f'Retrieved result from init_async: {self.result!r}')
+		self.logger.debug(f'Retrieved result from init_async: {self._result!r}')
 
-		assert self.result is not None
+		assert self._result is not None
 
-		return self.result
+		return self._result
 
 	def shutdown_loop(self) -> None:
 		self.logger.debug('Calling shutdown_loop()')

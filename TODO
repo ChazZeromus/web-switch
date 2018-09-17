@@ -160,8 +160,8 @@ or set_exception them
 Also we got tons of asyncio exception that happen even when tests succeed
 
 There seems ot be two event loops that are calling each other during test_convo test. test_convo's Router has its own
-event thread that is used by its own EventLoopThread object for reading from websockets, and ResponseDispatcher
-has its own EventLoopThread and uses its own thread when dispatch async actions, which is very problematic since
+event thread that is used by its own EventLoopManager object for reading from websockets, and ResponseDispatcher
+has its own EventLoopManager and uses its own thread when dispatch async actions, which is very problematic since
 the definition of these actions will be using methods like send() that are async but use Router's event loop and not
 one loop:/
     Seems like you could do is not explicitly specify the event loops when calling these functions. By omitting the event

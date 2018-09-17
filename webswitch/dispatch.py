@@ -10,7 +10,7 @@ import functools
 from copy import deepcopy
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
-from .event_loop import EventLoopThread
+from .event_loop import EventLoopManager
 from .index_map import IndexMap
 from .logger import g_logger
 
@@ -146,7 +146,7 @@ class ResponseDispatcher(object):
 		self.async_params = common_async_params
 		self.non_async_params = common_params
 
-		self.loop_thread: Optional[EventLoopThread] = None
+		self.event_manager: Optional[EventLoopManager] = None
 
 		self._actives: IndexMap[ActiveAction] = IndexMap('guid', 'source', 'action')
 
@@ -179,12 +179,12 @@ class ResponseDispatcher(object):
 		Start dispatch event loop. Will block until background event loop thread initializes.
 		This method must be called before ResponseDispatch can perform its duties.
 		"""
-		if self.loop_thread is None:
-			self.loop_thread = EventLoopThread()
+		if self.event_manager is None:
+			self.event_manager = EventLoopManager()
 
 		self.logger.debug('Spinning up loop thread')
-		self.loop_thread.start()
-		self.loop_thread.wait_result()
+		self.event_manager.start()
+		self.event_manager.wait_result()
 
 	def stop(self, timeout: Optional[float] = None) -> None:
 		"""
@@ -194,7 +194,7 @@ class ResponseDispatcher(object):
 		:param timeout:
 		:return:
 		"""
-		if not self.loop_thread:
+		if not self.event_manager:
 			raise DispatchNotStarted()
 
 		if self._stopping:
@@ -232,15 +232,15 @@ class ResponseDispatcher(object):
 				self.logger.info(f'Waiting {timeout} seconds for AwaitDispatches and actions to finish')
 
 				async def gather() -> None:
-					assert self.loop_thread is not None
+					assert self.event_manager is not None
 
 					await asyncio.gather(
 						*itertools.chain(pending_awaits, active_dispatches),
-						loop=self.loop_thread.event_loop,
+						loop=self.event_manager.event_loop,
 						return_exceptions=True,
 					)
 
-				result = self.loop_thread.run_coroutine_threadsafe(gather())
+				result = self.event_manager.run_coroutine_threadsafe(gather())
 
 				try:
 					result.result(timeout)
@@ -266,9 +266,9 @@ class ResponseDispatcher(object):
 				active.cancel_all()
 
 		self.logger.debug('Shutting down loop thread, and joining thread')
-		self.loop_thread.shutdown_loop()
-		self.loop_thread.join()
-		self.loop_thread = None
+		self.event_manager.shutdown_loop()
+		self.event_manager.join()
+		self.event_manager = None
 
 	def cancel_action_by_source(self, source: object) -> None:
 		with self._lock:
@@ -276,7 +276,7 @@ class ResponseDispatcher(object):
 				self.logger.debug('Not cancelling action because dispatcher has already stopped')
 				return
 
-			if not self.loop_thread:
+			if not self.event_manager:
 				raise DispatchNotStarted()
 
 			active_actions = self._actives.lookup(source=source)
@@ -289,7 +289,7 @@ class ResponseDispatcher(object):
 				for active in active_actions:
 					active.cancel_all()
 
-			self.loop_thread.call_soon_threadsafe(callback)
+			self.event_manager.call_soon_threadsafe(callback)
 
 	def _build_actions(self) -> None:
 		"""
@@ -447,10 +447,10 @@ class ResponseDispatcher(object):
 		if self._stopping:
 			raise DispatchStopping()
 
-		if not self.loop_thread:
+		if not self.event_manager:
 			raise DispatchNotStarted
 
-		future: asyncio.Future = self.loop_thread.event_loop.create_future()
+		future: asyncio.Future = self.event_manager.event_loop.create_future()
 		await_dispatch.set(future, params)
 
 		self.logger.debug(f'Awaiting {await_dispatch!r}')
@@ -460,8 +460,8 @@ class ResponseDispatcher(object):
 			# or cancel requests. Next dispatch must occur next event since this await_dispatch itself is an event. Cancel
 			async def async_timeout() -> None:
 				assert timeout is not None
-				assert self.loop_thread is not None
-				await asyncio.sleep(timeout, loop=self.loop_thread.event_loop)
+				assert self.event_manager is not None
+				await asyncio.sleep(timeout, loop=self.event_manager.event_loop)
 				future.set_exception(DispatchAwaitTimeout())
 				self.logger.warning(f'Awaiting response {await_dispatch} timed out in {timeout}')
 
@@ -470,12 +470,12 @@ class ResponseDispatcher(object):
 			# TODO: in stop(). And if no stop is issued, the concurrent future can be swapped with asyncio's. They
 			# TODO: both have .handle() methods, we could type that attribute as a Cancellabled or something.
 			def create_timeout_callback() -> None:
-				assert self.loop_thread is not None
+				assert self.event_manager is not None
 				self.logger.debug(f'Also awaiting response with timeout of {timeout}')
-				timeout_future = asyncio.ensure_future(async_timeout(), loop=self.loop_thread.event_loop)
+				timeout_future = asyncio.ensure_future(async_timeout(), loop=self.event_manager.event_loop)
 				await_dispatch.set_timeout_future(timeout_future)
 
-			self.loop_thread.call_soon_threadsafe(create_timeout_callback)
+			self.event_manager.call_soon_threadsafe(create_timeout_callback)
 
 		return future
 
@@ -488,7 +488,7 @@ class ResponseDispatcher(object):
 		:return:
 		"""
 
-		if not self.loop_thread:
+		if not self.event_manager:
 			raise DispatchNotStarted()
 
 		if action.exclusive_async:
@@ -519,7 +519,7 @@ class ResponseDispatcher(object):
 							future.cancel()
 						pending_await.cancel_timeout()
 
-					self.loop_thread.call_soon_threadsafe(cancel_callback)
+					self.event_manager.call_soon_threadsafe(cancel_callback)
 
 			if active_action.action_future:
 				active_action.action_future.cancel()
@@ -548,7 +548,7 @@ class ResponseDispatcher(object):
 		if self._stopped:
 			raise DispatchStopping()
 
-		if not self.loop_thread:
+		if not self.event_manager:
 			raise DispatchNotStarted()
 
 		_action: Optional[Action] = self.actions.get(action_name)
@@ -637,7 +637,7 @@ class ResponseDispatcher(object):
 
 			# Co-routine to run regardless of synchronocity
 			async def dispatch_async() -> Any:
-				assert self.loop_thread is not None
+				assert self.event_manager is not None
 				assert async_dispatch_callback is not None
 				dispatch_future = None
 
@@ -655,7 +655,7 @@ class ResponseDispatcher(object):
 					if not action.has_kwargs:
 						passed_args = {k: passed_args[k] for k in passed_args.keys() & action.params.keys()}
 
-					dispatch_future = asyncio.ensure_future(async_dispatch_callback(action, passed_args), loop=self.loop_thread.event_loop)
+					dispatch_future = asyncio.ensure_future(async_dispatch_callback(action, passed_args), loop=self.event_manager.event_loop)
 
 					active_action.action_future = dispatch_future
 
@@ -683,7 +683,7 @@ class ResponseDispatcher(object):
 					if dispatch_future:
 						active_action.action_future = None
 
-			def done_callback(loop_thread: EventLoopThread, done_future: asyncio.Future) -> None:
+			def done_callback(event_manager: EventLoopManager, done_future: asyncio.Future) -> None:
 				# Call cleanup handler if any
 				if cleanup_callback:
 					cleanup_callback()
@@ -692,7 +692,7 @@ class ResponseDispatcher(object):
 				if self._complete_handler and done_future.done() and not done_future.cancelled():
 					# Make sure handler is called in our event loop
 					# TODO: Do we need to do this event loop deferring elsewhere?
-					loop_thread.call_soon_threadsafe(
+					event_manager.call_soon_threadsafe(
 						self._complete_handler,
 						source,
 						action_name,
@@ -700,10 +700,10 @@ class ResponseDispatcher(object):
 						response_guid
 					)
 
-			fut = self.loop_thread.run_coroutine_threadsafe(dispatch_async())
+			fut = self.event_manager.run_coroutine_threadsafe(dispatch_async())
 
 			if cleanup_callback or self._complete_handler:
-				fut.add_done_callback(functools.partial(done_callback, self.loop_thread))
+				fut.add_done_callback(functools.partial(done_callback, self.event_manager))
 
 		# If this is a coroutine in progress, then continue its await_dispatch
 		elif action.is_coro:
@@ -738,7 +738,7 @@ class ResponseDispatcher(object):
 				existing_ad.cancel_timeout()
 				future.set_result(args)
 
-			self.loop_thread.call_soon_threadsafe(set_future_result_callback)
+			self.event_manager.call_soon_threadsafe(set_future_result_callback)
 
 		else:
 			self.logger.error(f'UUID collision for {action!r}')
