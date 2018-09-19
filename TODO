@@ -215,3 +215,16 @@ Fix DispatchNotStarted errors
     when a stop is requested. I suppose it's fine for now.
 
 Find all usages of format-string formatters in strings that aren't format strings
+
+Use asyncio's wait/wait_for, and shield for sensitive tasks. wait() could be used for ResponseDispatch's complex
+shutdown method where we wait but kill of straggling tasks.
+    Using asyncio.wait() in ResponseDispatch's shutdown method wouldn't be that beneficial as using it would simply
+    rid of the try catch block. We also end up not caring about what finished and what didn't from asyncio.wait()'s
+    (done, pending) return value as we loop through all active actions and call cancel_all(), which cancels any
+    of the action' ActiveDispatches and it's future. So (done, pending) is not needed.
+
+    As for using wait_for(), the only place I could really use it for is creating the AwaitDispatch and implementing
+    the timeout mechanism there. But I already use a nested function to run the timeout and then set the AwaitDispatch's
+    future's exception on timeout. If I use wait_for() I'll have to still make an inner nested function to catch
+    the timeout exception wait_for() throws and then make *our* timeout exception for the action. We can't await on
+    wait_for() in the AwaitDispatch creation method as it is synchronous and we have to return immediately.
