@@ -7,6 +7,7 @@ import inspect
 import re
 import itertools
 import functools
+import abc
 from copy import deepcopy
 from concurrent.futures import TimeoutError as ConcurrentTimeoutError
 
@@ -366,13 +367,28 @@ class ResponseDispatcher(object):
 
 			return active
 
-	# This is public because AwaitDispatch uses it
 	def remove_active_by_action(self, action: str, guid: Optional[uuid.UUID]) -> None:
+		"""
+		Removes an on-going action from list of in-flight actions.
+		Called by AwaitDispatch when action is canceled or cleaned-up.
+
+		:param action: Name of in-flight action to remove
+		:param guid: Response ID to in-flight action if any.
+		:return:
+		"""
+
+		#TODO: Not sure why this needs to be thread-safe
 		with self._lock:
 			active_action = self._actives.lookup_one(action=action, guid=guid)
 			self._actives.remove(active_action)
 
 	def remove_active_action(self, active_action: ActiveAction) -> None:
+		"""
+		Removes an on-going action from list of in-flight actions by specifying
+		the ActiveAction object.
+		:param active_action: ActiveAction object to remove.
+		:return:
+		"""
 		with self._lock:
 			self._actives.remove(active_action)
 
@@ -442,7 +458,15 @@ class ResponseDispatcher(object):
 			timeout: Optional[float] = None,
 	) -> asyncio.Future:
 		"""
-		Prepares AwaitDispatch object and create a future to await on
+		Prepares an AwaitDispatch and returns a future that sets when a dispatch() provides a result
+		for that particular `await_dispatch`'s action and response id. This method is called by the
+		AwaitDispatch object itself when its __call__() method is invoked.
+
+		:param await_dispatch: The AwaitDispatch object to eventually provide a result for.
+		:param params: Parameters that describe the result dict.
+		:param timeout: If provided, this is the time to wait for the result. A timeout results in the Future
+		being set with a DispatchAwaitTimeout() exception.
+		:return: Future that sets when a dispatch() for this `await_dispatch` is called or sets when timed out.
 		"""
 		if self._stopping:
 			raise DispatchStopping()
@@ -535,7 +559,7 @@ class ResponseDispatcher(object):
 		response_id: Optional[Union[str, uuid.UUID]] = None
 	) -> None:
 		"""
-		Dispatches an action onto an instance given the name of the action and the arguments
+		Dispatches an action onto the instance given the name of the action and the arguments
 		associated. And optionally provide a response ID for coroutine awaiting actions.
 		:param source: An object representing the source of dispatch, can be None for no source. A source is required
 		for actions to cancel existing await dispatches of async_exclusive actions.
@@ -882,7 +906,11 @@ class Action(object):
 		return repr(self)
 
 
-class AbstractAwaitDispatch(object):
+class AbstractAwaitDispatch(abc.ABC):
+	"""
+	Abstract wrapper around AwaitDispatch, can be sub-classed and used in place of
+	original by provided in ResponseDispatch's argument_hook.
+	"""
 	def get_await_dispatch(self) -> 'AwaitDispatch':
 		raise NotImplemented()
 
@@ -892,7 +920,7 @@ class AbstractAwaitDispatch(object):
 
 class AwaitDispatch(AbstractAwaitDispatch):
 	"""
-	A callable object that returns a future for awaiting for responses in a single action.
+	A callable object that returns a future for awaiting responses to dispatches to the same co-routine action.
 	"""
 	def __init__(
 		self,
