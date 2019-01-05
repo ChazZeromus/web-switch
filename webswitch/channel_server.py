@@ -54,15 +54,19 @@ class ChannelServerResponseError(RouterResponseError):
 
 # TODO: Create a ChannelClient class that can have multiple Connections
 class ChannelClient(object):
-	def __init__(self, channel: 'ChannelServer', conn: Connection) -> None:
-		self.channel = channel
-		self.conns = [conn]
+	"""
+	Object representing a single connected client. Also allows clients to
+	have multiple connections.
+	"""
+	def __init__(self, channel_server: 'ChannelServer', conn: Connection) -> None:
+		self.channel_server = channel_server
+		self.connections = [conn]
 		self.name: Optional[str] = None
 		self._room_key: Optional[Tuple[str, str]] = None
 
-		self.id: int = channel.get_next_client_id()
+		self.id: int = channel_server.get_next_client_id()
 
-		self.logger = channel.get_logger().getChild(f'ChannelClient:{self.id}')
+		self.logger = channel_server.get_logger().getChild(f'ChannelClient:{self.id}')
 		self.logger.debug(f'Created channel client {self!r}')
 
 	def get_room_key(self) -> Tuple[str, str]:
@@ -75,6 +79,12 @@ class ChannelClient(object):
 		self._room_key = key
 
 	async def send(self, message: Union[Message, Dict], response_id: Optional[uuid.UUID]) -> None:
+		"""
+		Sends a message to this client and all of its connections.
+		:param message: Message payload if any
+		:param response_id: AwaitDispatch response_id if required
+		:return:
+		"""
 		if isinstance(message, dict):
 			message = Message(data=message)
 
@@ -82,23 +92,33 @@ class ChannelClient(object):
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
-		await self.channel.send_messages(self.conns, message)
+		await self.channel_server.send_messages(self.connections, message)
 
 	def try_send(self, message: Message, response_id: Optional[uuid.UUID]) -> None:
+		"""
+		Same as send() but passively handles errors and logs them.
+		:param message: Payload to send
+		:param response_id: AwaitDispatch response_id if required
+		:return:
+		"""
 		if response_id is not None:
 			message = message.clone()
 			message.data.update(response_id=str(response_id))
 
-		self.channel.try_send_messages(self.conns, message)
+		self.channel_server.try_send_messages(self.connections, message)
 
 	def __repr__(self) -> str:
-		return f'ChannelClient(id:{self.id},conns:{len(self.conns)})'
+		return f'ChannelClient(id:{self.id},conns:{len(self.connections)})'
 
 	def __str__(self) -> str:
 		return repr(self)
 
 
 class Conversation(AbstractAwaitDispatch):
+	"""
+	A wrapper around Router's AwaitDispatch so dispatch-awaiting ChannelServer methods
+	have access to the current ChannelClient making the request.
+	"""
 	def __init__(self, client: ChannelClient, original: AwaitDispatch) -> None:
 		self.await_dispatch = original
 		self.client = client
@@ -120,6 +140,12 @@ class Conversation(AbstractAwaitDispatch):
 
 
 class ChannelServer(Router):
+	"""
+	A sub-class of a Router that allows clients (of one or many connections) to connect
+	a rooms to perform actions served by ChannelServer methods.
+	And also utilizing a ResponseDispatcher, these methods can be co-routines to allow
+	program-defined asynchronous back-and-forth request and responses.
+	"""
 	_common_intrinsic_params: Dict[str, Type] = {
 		'client': ChannelClient
 	}
@@ -166,7 +192,88 @@ class ChannelServer(Router):
 		self.last_client_id += 1
 		return self.last_client_id
 
+	def _add_connection(
+		self,
+		key: Tuple[str, str],
+		connection: Connection,
+		room: Set[ChannelClient],
+		other_data: Optional[str],
+	) -> None:
+		"""
+		Called when a new connection is established to determine if the connection is
+		a new ChannelClient or add the connection to a list of it is an existing
+		ChannelClient.
+		:param key:
+		:param connection:
+		:param room:
+		:param other_data:
+		:return:
+		"""
+		if other_data:
+			client_id = int(other_data)
+			client = self.id_to_client[client_id]
+			client.connections.append(connection)
+		else:
+			client = ChannelClient(self, connection)
+			self.id_to_client[client.id] = client
+			room.add(client)
+			client.set_room_key(key)
+
+		self.conn_to_client[connection] = client
+
+		self.logger.info(f'Added web-switch connection {connection!r} to {client!r} as Channel connection to room {key!r}')
+
+	def _remove_connection(self, connection: Connection) -> None:
+		"""
+		Cleanup version of _add_connection when disconnect occurs. Destroy ChannelClient
+		if it has no more connections.
+		:param connection:
+		:return:
+		"""
+		client = self.conn_to_client[connection]
+
+		del self.conn_to_client[connection]
+
+		client.connections.remove(connection)
+
+		self.logger.info(f'Removed connection {connection!r} from {client!r}')
+
+		if not client.connections:
+			room = self.rooms[client.get_room_key()]
+			room.remove(client)
+			del self.id_to_client[client.id]
+
+			self.logger.info(f'Removed last connection of {client!r}, removed client and cancelling actions')
+			self.dispatcher.cancel_action_by_source(client)
+
+	def _get_client(self, connection: Connection) -> ChannelClient:
+		"""
+		Helper method to retrieve a ChannelClient from a connection
+		:param connection:
+		:return:
+		"""
+		client = self.conn_to_client.get(connection)
+
+		if not client:
+			self.logger.error(f'Could not find client from connection {connection!r}')
+			raise ChannelServerError(f'Could not find client with given connection')
+
+		return client
+
+	############
+	# Handlers #
+	############
 	def argument_hook(self, args: Dict[str, Any], source: object, action: Action) -> Dict[str, Any]:
+		"""
+		Before dispatching any methods to serve a client's request, provide an intrinsic `client` argument
+		to be mainly used by synchronous ChannelServer actions. For asynchronous ChannelServer coroutine
+		actions, provide a `convo` argument that wraps AwaitDispatch and forwards the current ChannelClient's
+		send() methods.
+		:param args:
+		:param source:
+		:param action:
+		:return:
+		"""
 		assert isinstance(source, ChannelClient)
 
 		await_dispatch: Optional[AwaitDispatch] = args.get('await_dispatch')
@@ -184,43 +291,48 @@ class ChannelServer(Router):
 
 		return new_args
 
-	def handle_new_connection(
-		self,
-		key: Tuple[str, str],
-		connection: Connection,
-		room: Set[ChannelClient],
-		other_data: Optional[str],
+	# Define our exception handler for actions so we can notify client of the error for the particular response_id.
+	async def action_exception_handler(
+			self,
+			source: object,
+			action_name: str,
+			e: Exception,
+			response_id: uuid.UUID
 	) -> None:
-		if other_data:
-			client_id = int(other_data)
-			client = self.id_to_client[client_id]
-			client.conns.append(connection)
+		"""
+		If something bad happened during an action in response to a client. Send the client an error-type message, and
+		try to provide a response_id if action was a co-routine.
+		:param source:
+		:param action_name:
+		:param e:
+		:param response_id:
+		:return:
+		"""
+		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
+
+		assert isinstance(source, ChannelClient)
+
+		if not isinstance(e, RouterError):
+			e = ChannelServerResponseError(f'Unexpected non-RouterError exception: {str(e) or repr(e)}', orig_exc=e, response=response_id)
+
+		# Try to set response ID even if error isn't ChannelServerResponseError
+		if response_id:
+			ChannelServerResponseError.set_guid(e, response_id)
+
+		source.try_send(Message.error_from_exc(e), response_id)
+
+	# Define our completer when actions complete and return
+	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID) -> None:
+		assert isinstance(source, ChannelClient)
+
+		if isinstance(result, Dict):
+			source.try_send(Message(data=result, is_final=True), response_id)
 		else:
-			client = ChannelClient(self, connection)
-			self.id_to_client[client.id] = client
-			room.add(client)
-			client.set_room_key(key)
+			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
 
-		self.conn_to_client[connection] = client
-
-		self.logger.info(f'Added web-switch connection {connection!r} to {client!r} as Channel connection to room {key!r}')
-
-	def handle_remove_connection(self, connection: Connection) -> None:
-		client = self.conn_to_client[connection]
-
-		del self.conn_to_client[connection]
-
-		client.conns.remove(connection)
-
-		self.logger.info(f'Removed connection {connection!r} from {client!r}')
-
-		if not client.conns:
-			room = self.rooms[client.get_room_key()]
-			room.remove(client)
-			del self.id_to_client[client.id]
-
-			self.logger.info(f'Removed last connection of {client!r}, removed client and cancelling actions')
-			self.dispatcher.cancel_action_by_source(client)
+	####################
+	# Router overrides #
+	####################
 
 	def on_start(self) -> None:
 		self.dispatcher.start()
@@ -259,13 +371,13 @@ class ChannelServer(Router):
 
 				self.rooms[key] = room = set()
 
-			self.handle_new_connection(key, connection, room, groups.get('other'))
+			self._add_connection(key, connection, room, groups.get('other'))
 
 		except Exception as e:
 			connection.close(reason=str(e))
 
 	def on_remove(self, connection: Connection) -> None:
-		self.handle_remove_connection(connection)
+		self._remove_connection(connection)
 
 	def on_message(self, connection: Connection, message: Message) -> None:
 		action_name = message.data.get('action')
@@ -296,44 +408,9 @@ class ChannelServer(Router):
 			self.logger.error(f'dispatch error: {e!r}\n{traceback.format_exc()}')
 			raise ChannelServerError(f'Unexpected error performing action: {e!r}')
 
-	def _get_client(self, connection: Connection) -> ChannelClient:
-		client = self.conn_to_client.get(connection)
-
-		if not client:
-			self.logger.error(f'Could not find client from connection {connection!r}')
-			raise ChannelServerError(f'Could not find client with given connection')
-
-		return client
-
-	# Define our exception handler for actions so we can notify client of the error for the particular response_id.
-	async def action_exception_handler(
-		self,
-		source: object,
-		action_name: str,
-		e: Exception,
-		response_id: uuid.UUID
-	) -> None:
-		self.logger.warning(f'Exception while dispatching for action {action_name} with source {source}: {e!r}')
-
-		assert isinstance(source, ChannelClient)
-
-		if not isinstance(e, RouterError):
-			e = ChannelServerResponseError(f'Unexpected non-RouterError exception: {str(e) or repr(e)}', orig_exc=e, response=response_id)
-
-		# Try to set response ID even if error isn't ChannelServerResponseError
-		if response_id:
-			ChannelServerResponseError.set_guid(e, response_id)
-
-		source.try_send(Message.error_from_exc(e), response_id)
-
-	# Define our completer when actions complete and return
-	def action_complete_handler(self, source: object, action_name: str, result: Any, response_id: uuid.UUID) -> None:
-		assert isinstance(source, ChannelClient)
-
-		if isinstance(result, Dict):
-			source.try_send(Message(data=result, is_final=True), response_id)
-		else:
-			self.logger.warning(f'Action {action_name} returned a non-dict, so nothing to do: {result!r}')
+	#########################
+	# ChannelServer Actions #
+	#########################
 
 	@add_action()
 	def action_whoami(self, client: ChannelClient) -> Dict:

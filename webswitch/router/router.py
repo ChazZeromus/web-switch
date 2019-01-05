@@ -329,6 +329,13 @@ class Router(object):
 		recipients: List[Connection],
 		message: Message
 	) -> Iterable:
+		"""
+		Sends a message to list of connections.
+		:param recipients: List of connections to send message to
+		:param message: Message payload
+		:return: Returns async result from each send() command. Result should
+		be None for each connection unless an error occurred, then it would be an exception.
+		"""
 		payload = message.json()
 
 		gens = []
@@ -343,6 +350,13 @@ class Router(object):
 		))
 
 	def try_send_messages(self, recipients: List[Connection], message: Message) -> None:
+		"""
+		Same as send_messages() but is thread-safe and logs any errors. Typically used to send
+		messages and treat errors passively.
+		:param recipients: Connections to send to
+		:param message: Message payload
+		:return:
+		"""
 		async def _async_call() -> None:
 			results = await self.send_messages(recipients, message)
 
