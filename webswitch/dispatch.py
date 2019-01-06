@@ -635,7 +635,6 @@ class ResponseDispatcher(object):
 				# Callback to destroy AwaitDispatch
 				def remove_await_callback() -> None:
 					assert await_dispatch is not None
-					self.logger.debug(f'Action coroutine completed, removing {await_dispatch}')
 					await_dispatch.remove_and_cancel_timeout()
 
 				cleanup_callback = remove_await_callback

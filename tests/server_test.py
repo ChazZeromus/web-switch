@@ -179,13 +179,22 @@ async def test_unique_error_nonasync(client_with_server: Client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unique_error_async(client_with_server: Client) -> None:
-	convo = client_with_server.convo('raise_unique_error_async')
+async def test_unique_error_async(
+	get_server: Callable[[], ServerTestingServer],
+	get_client: Callable[[], Client]
+) -> None:
+	server = get_server()
+	server.serve(daemon=True)
 
-	with pytest.raises(ResponseException) as excinfo:
-		await convo.send_and_expect({})
+	async with get_client() as client:
+		with pytest.raises(ResponseException) as excinfo:
+			convo = client.convo('raise_unique_error_async')
+			await convo.send_and_expect({})
 
-	assert excinfo.value.data.get('exc_class') == 'UniqueError', 'Expecting UniqueError async'
+		assert excinfo.value.data.get('exc_class') == 'UniqueError', 'Expecting UniqueError async'
+		assert len(server.dispatcher._actives) == 0
+
+	server.stop_serve()
 
 
 @pytest.mark.asyncio
@@ -231,15 +240,16 @@ async def test_client_error(
 
 	server.serve(daemon=True)
 
-	with pytest.raises(ResponseException) as excinfo:
-		async with get_client() as client:
-			response = await client.convo('send_error_and_continue').send_and_expect({}, 2)
-
-	assert excinfo.value.message == 'some error'
+	async with get_client() as client:
+		with pytest.raises(ResponseException) as excinfo:
+			convo = client.convo('send_error_and_continue')
+			await convo.send_and_expect({}, 2)
+		assert excinfo.value.message == 'some error', 'Correct exception raised'
 
 	with TimeBox(2) as window:
 		server.stop_serve(window.timelimit)
 
+	assert len(server.dispatcher._actives) == 0, 'Active actions are cleaned up'
 
 # Note 1:
 # It's important to note that we don't want to stop_serve() inside of client context because
