@@ -69,6 +69,40 @@ class ActiveAction(object):
 			self.action_future.cancel()
 
 
+"""
+Defines an async handler for when ResponseDispatch's dispatch() method invokes an action-method
+that raises an exception.
+
+:param source: The user-defined source object supplied to the dispatch() call that triggered
+the exception.
+:param action: Name of the action-method that raised the exception.
+:param exception: The exception being raised
+:param response_id: A response ID if action-method is a coroutine
+"""
+ExceptionHandler = Callable[[object, str, Exception, uuid.UUID], Coroutine]
+
+"""
+Defines an async handler for when ResponseDispatch's dispatch() method invokes an action-method
+that has completed.
+
+:param source: The user-defined source object supplied to the dispatch() call.
+:param action: Name of the action-method that completed.
+:param result: The resultant value returned by the completed action-method.
+:param response_id: A response ID if action-method is a coroutine
+"""
+CompleteHandler = Callable[[object, str, Any, uuid.UUID], None]
+
+"""
+Defines an argument handler for when the ResponseDispatch's dispatch() method is called. This handler is called before
+the action-method is invoked to modify the dispatch()'s arguments to do things like adding extra arguments or modifying
+existing ones.
+
+:param arguments: Dict of arguments to be modified
+:param source: The user-defined source object supplied to the dispatch()
+:param action: Action object describing the parameters of the action-method.
+"""
+ArgumentHookHandler = Callable[[Dict, object, 'Action'], Dict]
+
 # TODO: For coroutine actions, perhaps implement a sort of session heartbeat for possible
 # TODO: long periods of waiting?
 
@@ -120,9 +154,9 @@ class ResponseDispatcher(object):
 		self,
 		instance: object,
 		common_params: ParameterSet = ParameterSet(),
-		exception_handler: Optional[Callable[[object, str, Exception, uuid.UUID], Coroutine]] = None,
-		complete_handler: Optional[Callable[[object, str, Any, uuid.UUID], None]] = None,
-		argument_hook: Optional[Callable[[Dict, object, 'Action'], Dict]] = None,
+		exception_handler: Optional[ExceptionHandler] = None,
+		complete_handler: Optional[CompleteHandler] = None,
+		argument_hook: Optional[ArgumentHookHandler] = None,
 		common_async_params: ParameterSet = ParameterSet(),
 	) -> None:
 		"""
@@ -561,10 +595,11 @@ class ResponseDispatcher(object):
 		"""
 		Dispatches an action onto the instance given the name of the action and the arguments
 		associated. And optionally provide a response ID for coroutine awaiting actions.
-		:param source: An object representing the source of dispatch, can be None for no source. A source is required
-		for actions to cancel existing await dispatches of async_exclusive actions.
-		:param action_name: Action name
-		:param args: Action arguments
+		:param source: A user-defined object representing the source of dispatch, can be None for no source. A source
+		is required for actions to cancel existing await dispatches of async_exclusive actions. e.g. A socket
+		connection object can be a source, or a user-defined int ID.
+		:param action_name: Name of action-method to invoke.
+		:param args: Explicit arguments to pass to action-method.
 		:param response_id: Guid of response session to reply to, if any
 		:return:
 		"""
