@@ -253,7 +253,7 @@ class Router(object):
 			self.on_new(connection, path)
 
 			# Reject if it was closed or nothing was returned
-			if connection.closed:
+			if connection.close_issued:
 				raise RouterConnectionError(connection.close_reason or 'No reason')
 
 			# Add connection to pool if everything went well
@@ -263,24 +263,28 @@ class Router(object):
 		except RouterError as e:
 			self.__logger.warning(f'Rejected {connection} for {e!r}')
 
-			await self.send_messages([connection], Message.error_from_exc(e))
+			# If not closed, try to send error
+			if not connection.close_issued:
+				await self.send_messages([connection], Message.error_from_exc(e))
+				connection.close(reason=str(e))
 
-			connection.close(reason=str(e))
 			await connection.wait_closed()
+			return
 
 		# Handle unexpected errors by displaying a close reason if one was set if handler
 		# closed manually, or show generic error to client like a 500 status.
 		except Exception as e:
 			self.__logger.error(f'{traceback.format_exc()}\nRejected {connection} for unexpected error {e!r}')
 
-			reason = connection.close_reason or 'Unexpected server error'
+			if not connection.close_issued:
+				reason = connection.close_reason or 'Unexpected server error'
+				await self.send_messages([connection], Message.error_from_exc(e))
+				connection.close(reason=reason)
 
-			await self.send_messages([connection], Message.error_from_exc(e))
-
-			connection.close(reason=reason)
 			await connection.wait_closed()
 			raise
 
+		# Async-loop for new messages for this connection
 		try:
 			async for message in websocket:
 				self.receive_queue.put((connection, message))

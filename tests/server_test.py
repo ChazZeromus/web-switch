@@ -56,6 +56,27 @@ def get_server_fixture(free_port: int) -> Callable[[], ServerTestingServer]:
 
 
 @pytest.mark.asyncio
+async def test_invalid_room(
+	get_server: Callable[[], ServerTestingServer],
+	free_port: int,
+) -> None:
+	server = get_server()
+	server.serve(daemon=True)
+
+	with pytest.raises(Exception) as excinfo:
+		client = Client(f'ws://{HOSTNAME}:{free_port}/incorrect')
+
+		async with client:
+			convo = client.convo('timeout')
+			await convo.send_and_expect({}) # Should never call
+
+	assert excinfo.value.data.get('exc_class') == 'RouterConnectionError', 'Expecting connection failure'
+	assert excinfo.value.message.startswith('Path must be')
+
+	server.stop_serve()
+
+
+@pytest.mark.asyncio
 async def test_response_dispatch_timeout(
 	get_server: Callable[[], ServerTestingServer],
 	get_client: Callable[[], Client],

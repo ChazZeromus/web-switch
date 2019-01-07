@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import SocketHandler
 from webswitch.logger import g_logger
 
 logging.basicConfig(format='[%(name)s] [%(levelname)s] %(message)s')

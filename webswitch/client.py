@@ -153,12 +153,18 @@ class MessageQueues(object):
 
 
 class Client:
+	"""
+	A little crude client class for web-switch servers.
+
+	To use:
+		with Client('ws://hostname:port/path/') as client:
+			await client.convo('do_something').send({})
+	"""
 	last_instance_id = 0
 
 	def __init__(self, ws_url: str, max_queued_messages: int = 1000) -> None:
 		self._url = ws_url
 		self._connection: WebSocketConnection = websockets.connect(ws_url)
-		# self._ctx: Optional[WebSocketClientProtocol] = None
 		self._ctx = None
 
 		Client.last_instance_id += 1
@@ -186,12 +192,19 @@ class Client:
 
 	async def __aenter__(self, *args: Any, **kwargs: Any) -> 'Client':
 		self._ctx = await self._connection.__aenter__(*args, **kwargs)
-		self._loop_fut = asyncio.ensure_future(self._recv_loop())
-		self._logger.debug(f'Async enter from event loop id {id(asyncio.get_event_loop()):x}')
+		try:
+			self._loop_fut = asyncio.ensure_future(self._recv_loop())
+			self._logger.debug(f'Async enter from event loop id {id(asyncio.get_event_loop()):x}')
+			self._ready = False  # Whether we can start accepting normal messages
 
-		message = await self.convo('whoami').send_and_expect({}, WHOAMI_WAIT)
+			message = await self.convo('whoami').send_and_expect({}, WHOAMI_WAIT)
+			self._ready = True
 
-		self._client_id = int(message.data['id'])
+			self._client_id = int(message.data['id'])
+		except Exception as e:
+			self._logger.error(f'Error connecting client: {e!r}')
+			await self._connection.__aexit__(None, None, None)
+			raise
 
 		return self
 
@@ -236,6 +249,8 @@ class Client:
 				guid = self._extract_guid(message)
 				convo = self._active_convos.get(guid)
 
+				# If this message is an error, send it to the correct
+				# conversation.
 				if error:
 					error_data = message.error_data or {}
 
@@ -244,6 +259,16 @@ class Client:
 					if convo:
 						await convo.queue.put(exc)
 
+					# If client is still connecting and we received an error, send to all active conversations
+					# (should just be the whoami action, but in case we perform more requests before ready in
+					# the future). The error is most likely an error-on-connect (client may have incorrect
+					# websocket url or is banned etc)
+					if not self._ready:
+						self._logger.error(f'Received error before client is in ready state: {exc!r}')
+						for active_convo in self._active_convos.values():
+							await active_convo.queue.put(exc)
+
+					# If no conversations are available, raise and just log error
 					raise ReceiveException(f'Error from server: {exc}')
 
 				if convo:
@@ -396,7 +421,7 @@ class Convo:
 
 	# TODO: Implement __aiter__ for continuous messages
 
-	async def send_and_expect(self, data: Union[dict, Message], timeout: float = 10.0) -> Message:
+	async def send_and_expect(self, data: Union[dict, Message], timeout: Optional[float] = 10.0) -> Message:
 		await self.send(data)
 		return await self.expect(timeout)
 

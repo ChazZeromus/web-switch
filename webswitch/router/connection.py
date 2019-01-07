@@ -75,6 +75,10 @@ class Connection(object):
 		self.logger = g_logger.getChild(f'Connection:{self.conn_id}')
 		self.logger.debug(f'Created connection {self!r}')
 
+	@property
+	def close_issued(self) -> bool:
+		return self._close_issued
+
 	def copy_to_subclass(self, subclassed_object: 'Connection') -> None:
 		"""
 		Copy contents of normal Connection object to subclass instance of Connection.

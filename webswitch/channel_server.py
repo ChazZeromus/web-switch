@@ -373,6 +373,10 @@ class ChannelServer(Router):
 
 			self._add_connection(key, connection, room, groups.get('other'))
 
+		# Forward these errors so their details are provided to client
+		except RouterConnectionError as e:
+			raise
+
 		except Exception as e:
 			connection.close(reason=str(e))
 
