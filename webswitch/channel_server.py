@@ -355,7 +355,7 @@ class ChannelServer(Router):
 				groups.update(matches.groupdict())
 
 			# They absolutely must be provided, no excuses!
-			if not groups['channel'] or not groups['room']:
+			if not groups.get('channel') or not groups.get('room'):
 				raise RouterConnectionError("Path must be /<channel>/<room>/")
 
 			self.logger.debug(f'New connection {connection} with path {path!r}')

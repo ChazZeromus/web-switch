@@ -192,8 +192,8 @@ class Client:
 
 	async def __aenter__(self, *args: Any, **kwargs: Any) -> 'Client':
 		self._ctx = await self._connection.__aenter__(*args, **kwargs)
+		self._loop_fut = asyncio.ensure_future(self._recv_loop())
 		try:
-			self._loop_fut = asyncio.ensure_future(self._recv_loop())
 			self._logger.debug(f'Async enter from event loop id {id(asyncio.get_event_loop()):x}')
 			self._ready = False  # Whether we can start accepting normal messages
 
@@ -203,7 +203,7 @@ class Client:
 			self._client_id = int(message.data['id'])
 		except Exception as e:
 			self._logger.error(f'Error connecting client: {e!r}')
-			await self._connection.__aexit__(None, None, None)
+			await self.__aexit__(None, None, None)
 			raise
 
 		return self
