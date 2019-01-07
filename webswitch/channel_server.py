@@ -275,8 +275,10 @@ class ChannelServer(Router):
 		if key not in self.rooms:
 			raise ChannelServerActionError(f'Room {key!r} does not exist')
 
+		_targets = targets if targets is not None else (c.id for c in self.rooms[key])
+
 		# Find invalid IDs
-		for target_id in targets or self.rooms[key]:
+		for target_id in _targets:
 			client_ = self.id_to_client.get(target_id)
 
 			if not client_:
