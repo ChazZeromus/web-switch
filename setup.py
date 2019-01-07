@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 name = 'webswitch'
 description = 'Channel-style websocket server'
-version = '0.0.3'
+version = '0.0.4'
 depends=[
 	'websockets>=6.0',
 	'dataclasses>=0.6',

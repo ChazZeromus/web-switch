@@ -176,11 +176,10 @@ class Router(object):
 			success = event_manager.wait_result()
 		except Exception as e:
 			self.__logger.error(f'{event_manager.exception_traceback}\nCould not start server: {e!r}')
-		finally:
-			self._ready_event.set()
 
 		if success:
 			self.on_start()
+			self._ready_event.set()  # Signal ready when start handler finishes
 
 			self.__logger.info(f'Serving {self.host}:{self.port}')
 			self._interrupt_event.wait()
@@ -188,6 +187,7 @@ class Router(object):
 			self.on_stop()
 		else:
 			self.__logger.error(f'{event_manager.exception_traceback} Could not start server!')
+			self._ready_event.set()  # Signal ready when an error occurred in on_start() or event_manager.wait_result()
 
 		# Mark router as closed so new connections are dropped in the meantime
 		self._set_closed()
