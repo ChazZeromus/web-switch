@@ -228,3 +228,8 @@ shutdown method where we wait but kill of straggling tasks.
     future's exception on timeout. If I use wait_for() I'll have to still make an inner nested function to catch
     the timeout exception wait_for() throws and then make *our* timeout exception for the action. We can't await on
     wait_for() in the AwaitDispatch creation method as it is synchronous and we have to return immediately.
+
+For simplicity only one GUID is generated per conversation but not for each send_and_expects(). For the sake debugging,
+instead of generated a GUID for each expect() and making it very difficult to debug and find what guid belongs to which
+expect(), generate a sequence number that the client must match and expect for coordination. For now we don't need it
+so much as there are other guardrails like parameter-types for specific expect()s.
