@@ -28,6 +28,9 @@ class ChannelServerActionError(ChannelServerError):
 		self.error_types.append('channel_action_error')
 
 
+RoomChannelKey = Tuple[str, str]
+
+
 class ChannelServerResponseError(RouterResponseError):
 	def __init__(
 		self,
@@ -62,20 +65,20 @@ class ChannelClient(object):
 		self.channel_server = channel_server
 		self.connections = [conn]
 		self.name: Optional[str] = None
-		self._room_key: Optional[Tuple[str, str]] = None
+		self._room_key: Optional[RoomChannelKey] = None
 
 		self.id: int = channel_server.get_next_client_id()
 
 		self.logger = channel_server.get_logger().getChild(f'ChannelClient:{self.id}')
 		self.logger.debug(f'Created channel client {self!r}')
 
-	def get_room_key(self) -> Tuple[str, str]:
+	def get_room_key(self) -> RoomChannelKey:
 		if not self._room_key:
 			raise ChannelServerError('No room key to retrieve')
 
 		return self._room_key
 
-	def set_room_key(self, key: Tuple[str, str]) -> None:
+	def set_room_key(self, key: RoomChannelKey) -> None:
 		self._room_key = key
 
 	async def send(self, message: Union[Message, Dict], response_id: Optional[uuid.UUID]) -> None:
@@ -162,7 +165,7 @@ class ChannelServer(Router):
 
 	def __init__(self, host: str, port: int, max_queue_size: int = 100) -> None:
 		super(ChannelServer, self).__init__(host, port, max_queue_size)
-		self.rooms: Dict[Tuple[str, str], Set[ChannelClient]] = {}
+		self.rooms: Dict[RoomChannelKey, Set[ChannelClient]] = {}
 		self.conn_to_client: Dict[Connection, ChannelClient] = {}
 		# TODO: Make ID-to-client mapping local to room
 		self.id_to_client: Dict[int, ChannelClient] = {}
@@ -194,7 +197,7 @@ class ChannelServer(Router):
 
 	def _add_connection(
 		self,
-		key: Tuple[str, str],
+		key: RoomChannelKey,
 		connection: Connection,
 		room: Set[ChannelClient],
 		other_data: Optional[str],
@@ -259,6 +262,40 @@ class ChannelServer(Router):
 			raise ChannelServerError(f'Could not find client with given connection')
 
 		return client
+
+	async def send_to(self,
+		data: dict,
+		targets: Optional[List[int]],
+		key: RoomChannelKey,
+		sender_id: Optional[int],
+	) -> None:
+		# TODO: Do we want a way to broadcast to all rooms eventually?
+		target_clients: List[ChannelClient] = []
+
+		if key not in self.rooms:
+			raise ChannelServerActionError(f'Room {key!r} does not exist')
+
+		# Find invalid IDs
+		for target_id in targets or self.rooms[key]:
+			client_ = self.id_to_client.get(target_id)
+
+			if not client_:
+				raise ChannelServerActionError(f'No client with id {target_id} exists')
+
+			if key and key != client_.get_room_key():
+				raise ChannelServerActionError(f'Client {client_!r} is not in room {key!r}')
+
+			target_clients.append(client_)
+
+		data_to_send = dict(data)
+
+		if sender_id is not None:
+			data_to_send['sender_id'] = sender_id
+
+		message = Message(data_to_send)
+
+		for client_ in target_clients:
+			client_.try_send(message, response_id=None)
 
 	############
 	# Handlers #
@@ -422,22 +459,14 @@ class ChannelServer(Router):
 
 	@add_action(params={'targets': list, 'data': dict})
 	async def action_send(self, convo: Conversation, targets: List[int], data: dict, client: ChannelClient) -> None:
-		this_key = client.get_room_key()
-		target_clients: List[ChannelClient] = []
+		key = client.get_room_key()
 
-		# Find invalid IDs
-		for target_id in targets:
-			client_ = self.id_to_client.get(target_id)
-
-			if not client_ or client_.get_room_key() != this_key:
-				raise ChannelServerActionError('Invalid target id')
-
-			target_clients.append(client_)
-
-		message = Message({**data, 'sender_id': client.id})
-
-		for client_ in target_clients:
-			client_.try_send(message, response_id=None)
+		await self.send_to(
+			data,
+			targets,
+			key,
+			client.id,
+		)
 
 	@add_action()
 	def action_enum_clients(self, client: ChannelClient) -> Dict:
