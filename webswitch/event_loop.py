@@ -86,8 +86,7 @@ class EventLoopManager(threading.Thread):
 	async def _run_init_async(self) -> InitReturn:
 		self.logger.debug('Running init_async')
 		return await asyncio.ensure_future(
-			# TODO: Some weird mypy bug
-			cast(Awaitable[InitReturn], self._init_async_func()),
+			self._init_async_func(),
 			loop=self.event_loop
 		)
 

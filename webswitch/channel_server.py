@@ -5,6 +5,7 @@ import uuid
 import argparse
 import asyncio
 
+
 from .logger import g_logger
 from .dispatch import ResponseDispatcher, AwaitDispatch, AbstractAwaitDispatch, add_action, Action, ParameterSet
 from .router.errors import RouterError, RouterResponseError, RouterConnectionError
@@ -146,8 +147,13 @@ class ChannelServer(Router):
 	"""
 	A sub-class of a Router that allows clients (of one or many connections) to connect
 	a rooms to perform actions served by ChannelServer methods.
+
 	And also utilizing a ResponseDispatcher, these methods can be co-routines to allow
 	program-defined asynchronous back-and-forth request and responses.
+
+	Clients connect and specify which "channels" they'd like to join. Clients can listen
+	to non-action-specific messages (from other clients or sub-classes of this server) by
+	listening messages that not have a response_id.
 	"""
 	_common_intrinsic_params: Dict[str, Type] = {
 		'client': ChannelClient

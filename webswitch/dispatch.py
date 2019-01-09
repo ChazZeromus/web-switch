@@ -1021,6 +1021,9 @@ class AwaitDispatch(AbstractAwaitDispatch):
 
 
 class DispatchError(Exception):
+	def __init__(self, *args: Any, **kwargs: Any):
+		super().__init__(*args, **kwargs)
+
 	def __str__(self) -> str:
 		return super(DispatchError, self).__str__() if self.args else self.__class__.__name__
 

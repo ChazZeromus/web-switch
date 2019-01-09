@@ -152,7 +152,7 @@ class MessageQueues(object):
 		return list(self._queues.keys())
 
 
-class Client:
+class Client(object):
 	"""
 	A little crude client class for web-switch servers.
 
@@ -165,14 +165,17 @@ class Client:
 	def __init__(self, ws_url: str, max_queued_messages: int = 1000) -> None:
 		self._url = ws_url
 		self._connection: WebSocketConnection = websockets.connect(ws_url)
-		self._ctx = None
+		# NOTE: Didn't annotate this and for some reason mypy assumed null checks of it
+		# could indicate dead-code when _ctx could fully be modified outside of this
+		# class
+		self._ctx: Optional[WebSocketClientProtocol] = None
 
 		Client.last_instance_id += 1
 		self._id: int = Client.last_instance_id
 
 		self._client_id: Optional[int] = None
 
-		self._active_convos: Dict[uuid.UUID, Convo] = {}
+		self._active_convos: Dict[Optional[uuid.UUID], Convo] = {}
 		self._logger: Logger = g_logger.getChild('Client')
 		self._loop_fut: Optional[asyncio.Future] = None
 
@@ -277,7 +280,7 @@ class Client:
 
 				elif guid is not None:
 					self._logger.info(f'Got response for non-existent conversation {guid!r}, queuing')
-					await self._queues.add(guid, message)
+					self._queues.add(guid, message)
 				else:
 					self._logger.warning(f'No response ID provided in body: {data!r}')
 

@@ -22,7 +22,6 @@ from ..logger import g_logger
 
 def _route_thread(
 		message_callback: Callable[[Connection, str], None],
-		remove_callback: Callable[[Connection], None],
 		conn_list: ConnectionList,
 		receive_queue: Queue,
 		logger: logging.Logger) -> None:
@@ -162,7 +161,6 @@ class Router(object):
 			target=_route_thread,
 			args=(
 				self._handle_message,
-				self.on_remove,
 				self.connection_list,
 				self.receive_queue,
 				self.__logger,
