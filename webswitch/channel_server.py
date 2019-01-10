@@ -279,7 +279,8 @@ class ChannelServer(Router):
 		target_clients: List[ChannelClient] = []
 
 		if key not in self.rooms:
-			raise ChannelServerActionError(f'Room {key!r} does not exist')
+			self.logger.warning(f'Cannot send, room {key!r} does not exist')
+			return
 
 		_targets = targets if targets is not None else (c.id for c in self.rooms[key])
 
