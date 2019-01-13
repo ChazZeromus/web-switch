@@ -360,7 +360,10 @@ class Router(object):
 		:return:
 		"""
 		async def _async_call() -> None:
-			results = await self.send_messages(recipients, message)
+			try:
+				results = await self.send_messages(recipients, message)
+			except Exception as e:
+				self.__logger.error(f'Error when trying to try send_message(): {e!r}')
 
 			errors = []
 			passive = []
