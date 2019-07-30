@@ -1,4 +1,4 @@
-mypy==0.650
-pytest==3.6.3
-pytest-asyncio==0.8.0
+mypy==0.720
+pytest==5.0.1
+pytest-asyncio==0.10.0
 git+git://github.com/ChazZeromus/pytest-stubs.git@master#pytest-stubs

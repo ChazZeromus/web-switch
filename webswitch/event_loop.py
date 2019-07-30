@@ -164,7 +164,7 @@ class EventLoopManager(threading.Thread):
 		# Get all uncompleted tasks to wait on, noteworthy that we're calling this
 		# before calling func() and creating it as a task as to not wait for itself
 		# and thus causing .result() to wait indefinitely.
-		pending = asyncio.Task.all_tasks(loop=self.event_loop)
+		pending = asyncio.all_tasks(loop=self.event_loop)
 
 		self.logger.debug(f'Waiting on {len(pending)} tasks')
 
